@@ -7,6 +7,9 @@ const key  = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const supabase = createClient<any>(url, key)
 
-// Server-side helper
+// Server-side helper — uses service role key to bypass RLS
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function createServerClient() { return createClient<any>(url, key) }
+export function createServerClient() {
+  const serverKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? key
+  return createClient<any>(url, serverKey)
+}
