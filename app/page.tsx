@@ -134,9 +134,9 @@ export default async function DashboardPage() {
               <div className="card-body">
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 14 }}>
                   {[
-                    { label: 'Online',  count: up,   pct: (up/total*100).toFixed(1),   cls: 'pbar-ok'   },
-                    { label: 'Warning', count: warn, pct: (warn/total*100).toFixed(1), cls: 'pbar-warn'  },
-                    { label: 'Offline', count: down, pct: (down/total*100).toFixed(1), cls: 'pbar-crit'  },
+                    { label: 'Online',  count: up,   pct: total ? (up/total*100).toFixed(1)   : '0.0', cls: 'pbar-ok'   },
+                    { label: 'Warning', count: warn, pct: total ? (warn/total*100).toFixed(1) : '0.0', cls: 'pbar-warn'  },
+                    { label: 'Offline', count: down, pct: total ? (down/total*100).toFixed(1) : '0.0', cls: 'pbar-crit'  },
                   ].map(row => (
                     <div key={row.label}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5, fontSize: 12 }}>
