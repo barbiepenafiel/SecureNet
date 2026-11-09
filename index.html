@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NetWatch — Network Monitoring System</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/main.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+</head>
+<body>
+<div class="app">
+
+<!-- ════════════════ SIDEBAR ════════════════ -->
+<aside class="sidebar">
+  <div class="logo">
+    <div class="logo-dot"></div>
+    <span>NetWatch</span>
+    <span style="margin-left:auto;font-size:11px;color:var(--text3)" id="live-clock"></span>
+  </div>
+
+  <nav>
+    <div class="nav-section">
+      <div class="nav-label">Monitor</div>
+      <div class="nav-item active" data-view="dashboard"><span class="nav-icon">◈</span> Dashboard</div>
+      <div class="nav-item" data-view="devices"><span class="nav-icon">⬡</span> Devices</div>
+      <div class="nav-item" data-view="alerts"><span class="nav-icon">⚡</span> Alerts <span class="badge" id="badge-alerts">5</span></div>
+      <div class="nav-item" data-view="topology"><span class="nav-icon">⬡</span> Topology</div>
+      <div class="nav-item" data-view="floorplan"><span class="nav-icon">⊞</span> Floor Plan</div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">Insights</div>
+      <div class="nav-item" data-view="clients"><span class="nav-icon">◉</span> Clients</div>
+      <div class="nav-item" data-view="traffic"><span class="nav-icon">≋</span> Traffic</div>
+      <div class="nav-item" data-view="sla"><span class="nav-icon">◎</span> SLA / Uptime</div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">Operations</div>
+      <div class="nav-item" data-view="lifecycle"><span class="nav-icon">⟳</span> Lifecycle</div>
+      <div class="nav-item" data-view="config"><span class="nav-icon">◫</span> Config Backup</div>
+      <div class="nav-item" data-view="reports"><span class="nav-icon">◧</span> Reports</div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">Admin</div>
+      <div class="nav-item" data-view="settings"><span class="nav-icon">◈</span> Settings</div>
+      <div class="nav-item" data-view="auditlog"><span class="nav-icon">≡</span> Audit Log</div>
+    </div>
+  </nav>
+
+  <div class="sidebar-footer">
+    <div class="avatar">BA</div>
+    <div class="sidebar-user">
+      <strong>Barbie Admin</strong>
+      <span>Main Admin</span>
+    </div>
+  </div>
+</aside>
+
+<!-- ════════════════ MAIN ════════════════ -->
+<div class="main">
+
+  <!-- Topbar -->
+  <div class="topbar">
+    <span class="topbar-title" id="topbar-title">Dashboard</span>
+    <span class="topbar-sep">/</span>
+    <span class="topbar-sub" id="topbar-sub">Overview</span>
+    <div class="topbar-actions">
+      <div class="dot-pulse"></div>
+      <span style="font-size:12px;color:var(--text3)">Live</span>
+      <button class="btn btn-sm" onclick="openMaintenance()">🔧 Maintenance</button>
+      <button class="btn btn-primary btn-sm" onclick="openAddDevice()">+ Add Device</button>
+    </div>
+  </div>
+
+  <div class="content">
+
+    <!-- ══════════ DASHBOARD ══════════ -->
+    <div class="view active" id="view-dashboard">
+      <div class="kpi-row">
+        <div class="kpi kpi-ok">
+          <div class="kpi-label">Devices Up</div>
+          <div class="kpi-value">14</div>
+          <div class="kpi-sub">of 17 total</div>
+        </div>
+        <div class="kpi kpi-crit">
+          <div class="kpi-label">Active Alerts</div>
+          <div class="kpi-value">5</div>
+          <div class="kpi-sub">3 critical · 2 warning</div>
+        </div>
+        <div class="kpi kpi-info">
+          <div class="kpi-label">Clients Online</div>
+          <div class="kpi-value">186</div>
+          <div class="kpi-sub">↑ 12 from yesterday</div>
+        </div>
+        <div class="kpi kpi-warn">
+          <div class="kpi-label">Avg SLA (30d)</div>
+          <div class="kpi-value">99.4%</div>
+          <div class="kpi-sub">Target: 99.9%</div>
+        </div>
+      </div>
+
+      <div class="grid-70-30" style="margin-bottom:14px">
+        <div class="card">
+          <div class="card-header">
+            Network Traffic — Last 24h
+            <div class="card-header-actions">
+              <select class="form-select" style="width:120px;padding:4px 8px;font-size:12px" onchange="updateTrafficChart(this.value)">
+                <option value="24h">Last 24h</option>
+                <option value="7d">Last 7 days</option>
+                <option value="30d">Last 30 days</option>
+              </select>
+            </div>
+          </div>
+          <div class="card-body"><canvas id="trafficChart" height="130"></canvas></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">Recent Alerts</div>
+          <div class="alert-item">
+            <div class="alert-sev alert-sev-crit"></div>
+            <div class="alert-body">
+              <div class="alert-title">Switch-B2 unreachable</div>
+              <div class="alert-meta"><span>🏢 Building B</span><span>3 min ago</span></div>
+            </div>
+            <div class="alert-actions"><button class="btn btn-sm" onclick="ackAlertById(1)">Ack</button></div>
+          </div>
+          <div class="alert-item suppressed">
+            <div class="alert-sev alert-sev-crit"></div>
+            <div class="alert-body">
+              <div class="alert-title">AP-B-01 unreachable <span class="chip chip-off" style="font-size:11px">suppressed</span></div>
+              <div class="alert-meta"><span>Root cause: Switch-B2 ↑</span></div>
+            </div>
+          </div>
+          <div class="alert-item">
+            <div class="alert-sev alert-sev-warn"></div>
+            <div class="alert-body">
+              <div class="alert-title">Core-SW-1 CPU 87%</div>
+              <div class="alert-meta"><span>🏢 Building A</span><span>12 min ago</span></div>
+            </div>
+            <div class="alert-actions"><button class="btn btn-sm" onclick="ackAlertById(4)">Ack</button></div>
+          </div>
+          <div class="alert-item">
+            <div class="alert-sev alert-sev-warn"></div>
+            <div class="alert-body">
+              <div class="alert-title">WAN uplink latency 180ms</div>
+              <div class="alert-meta"><span>Threshold: 100ms</span><span>18 min ago</span></div>
+            </div>
+            <div class="alert-actions"><button class="btn btn-sm" onclick="ackAlertById(5)">Ack</button></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-3">
+        <div class="card">
+          <div class="card-header">Device Health</div>
+          <div class="card-body">
+            <div style="display:flex;flex-direction:column;gap:12px;margin-bottom:14px">
+              <div>
+                <div style="display:flex;justify-content:space-between;margin-bottom:5px;font-size:12px"><span>Up <strong>14</strong></span><span style="color:var(--ok)">82.4%</span></div>
+                <div class="pbar"><div class="pbar-fill pbar-ok" style="width:82.4%"></div></div>
+              </div>
+              <div>
+                <div style="display:flex;justify-content:space-between;margin-bottom:5px;font-size:12px"><span>Warning <strong>1</strong></span><span style="color:var(--warn)">5.9%</span></div>
+                <div class="pbar"><div class="pbar-fill pbar-warn" style="width:5.9%"></div></div>
+              </div>
+              <div>
+                <div style="display:flex;justify-content:space-between;margin-bottom:5px;font-size:12px"><span>Down <strong>2</strong></span><span style="color:var(--crit)">11.8%</span></div>
+                <div class="pbar"><div class="pbar-fill pbar-crit" style="width:11.8%"></div></div>
+              </div>
+            </div>
+            <canvas id="devicePieChart" height="130"></canvas>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">SLA by Building</div>
+          <div class="card-body">
+            <div style="display:flex;flex-direction:column;gap:14px">
+              <div>
+                <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>Building A</span><strong>99.9%</strong></div>
+                <div class="pbar"><div class="pbar-fill pbar-ok" style="width:99.9%"></div></div>
+              </div>
+              <div>
+                <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>Building B</span><strong style="color:var(--warn)">98.1%</strong></div>
+                <div class="pbar"><div class="pbar-fill pbar-warn" style="width:98.1%"></div></div>
+              </div>
+              <div>
+                <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>Building C</span><strong>99.7%</strong></div>
+                <div class="pbar"><div class="pbar-fill pbar-ok" style="width:99.7%"></div></div>
+              </div>
+              <div>
+                <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>Data Center</span><strong>100%</strong></div>
+                <div class="pbar"><div class="pbar-fill pbar-ok" style="width:100%"></div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">Trend Predictions</div>
+          <div class="card-body">
+            <div style="display:flex;flex-direction:column;gap:10px">
+              <div style="background:rgba(248,81,73,.08);border:1px solid rgba(248,81,73,.2);border-radius:var(--r);padding:10px">
+                <div style="font-size:12px;font-weight:600;color:var(--crit)">⚠ Disk critical in ~2 days</div>
+                <div style="font-size:12px;color:var(--text2);margin-top:3px">Core-SW-1 flash at 86%, trend +3%/day</div>
+              </div>
+              <div style="background:rgba(210,153,34,.08);border:1px solid rgba(210,153,34,.2);border-radius:var(--r);padding:10px">
+                <div style="font-size:12px;font-weight:600;color:var(--warn)">⚑ WAN BW threshold ~6 days</div>
+                <div style="font-size:12px;color:var(--text2);margin-top:3px">Uplink at 73%, growing 4%/week</div>
+              </div>
+              <div style="background:rgba(88,166,255,.08);border:1px solid rgba(88,166,255,.2);border-radius:var(--r);padding:10px">
+                <div style="font-size:12px;font-weight:600;color:var(--info)">ℹ AP-A-04 nearing client limit</div>
+                <div style="font-size:12px;color:var(--text2);margin-top:3px">21/25 clients — peak hours soon</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ DEVICES ══════════ -->
+    <div class="view" id="view-devices">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap">
+        <input class="form-input" id="device-search" style="width:220px" placeholder="Search devices…">
+        <select class="form-select" id="device-type" style="width:150px">
+          <option value="">All types</option>
+          <option>Router</option><option>Switch</option><option>Access Point</option><option>Server</option><option>Firewall</option>
+        </select>
+        <select class="form-select" id="device-bldg" style="width:150px">
+          <option value="">All buildings</option>
+          <option>Building A</option><option>Building B</option><option>Building C</option><option>Data Center</option>
+        </select>
+        <span style="margin-left:auto;color:var(--text3);font-size:12px"><span id="device-count">0</span> devices</span>
+      </div>
+      <div class="card">
+        <div style="overflow-x:auto">
+          <table class="tbl">
+            <thead><tr><th>Name</th><th>Type</th><th>IP</th><th>Location</th><th>Status</th><th>Uptime</th><th>CPU</th><th>Actions</th></tr></thead>
+            <tbody id="devices-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ ALERTS ══════════ -->
+    <div class="view" id="view-alerts">
+      <div style="display:flex;gap:10px;margin-bottom:16px;align-items:center;flex-wrap:wrap">
+        <div class="tabs" style="margin-bottom:0">
+          <div class="tab active" onclick="filterAlertTab(this,'all')">All (7)</div>
+          <div class="tab" onclick="filterAlertTab(this,'active')">Active (5)</div>
+          <div class="tab" onclick="filterAlertTab(this,'acked')">Acknowledged (1)</div>
+          <div class="tab" onclick="filterAlertTab(this,'suppressed')">Suppressed (2)</div>
+        </div>
+        <button class="btn btn-sm" style="margin-left:auto" onclick="ackAllAlerts()">Ack All</button>
+      </div>
+      <div class="card" id="alerts-list" style="margin-bottom:14px"></div>
+      <div class="card">
+        <div class="card-header">Escalation Policy</div>
+        <div class="card-body">
+          <table class="tbl">
+            <thead><tr><th>Level</th><th>Wait</th><th>Notify</th><th>Channel</th></tr></thead>
+            <tbody>
+              <tr><td>L1</td><td>0 min</td><td>On-call tech</td><td>Email + Telegram</td></tr>
+              <tr><td>L2</td><td>15 min (no ack)</td><td>Network Admin</td><td>SMS + Slack</td></tr>
+              <tr><td>L3</td><td>30 min (no ack)</td><td>IT Manager</td><td>Phone call</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ TOPOLOGY ══════════ -->
+    <div class="view" id="view-topology">
+      <div class="card">
+        <div class="card-header">
+          Network Topology — Auto-discovered
+          <div class="card-header-actions">
+            <button class="btn btn-sm" onclick="alert('Rediscovery started…')">⟳ Rediscover</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <svg width="100%" viewBox="0 0 760 420" style="font-family:var(--font)">
+            <!-- Links -->
+            <line x1="380" y1="60" x2="140" y2="175" stroke="#30363d" stroke-width="2"/>
+            <line x1="380" y1="60" x2="380" y2="175" stroke="#30363d" stroke-width="2"/>
+            <line x1="380" y1="60" x2="620" y2="175" stroke="#30363d" stroke-width="2"/>
+            <line x1="140" y1="175" x2="80"  y2="295" stroke="#30363d" stroke-width="1.5"/>
+            <line x1="140" y1="175" x2="190" y2="295" stroke="#30363d" stroke-width="1.5"/>
+            <line x1="140" y1="175" x2="260" y2="295" stroke="#30363d" stroke-width="1.5"/>
+            <line x1="380" y1="175" x2="330" y2="295" stroke="#f85149" stroke-width="1.5" stroke-dasharray="6,3"/>
+            <line x1="380" y1="175" x2="430" y2="295" stroke="#f85149" stroke-width="1.5" stroke-dasharray="6,3"/>
+            <line x1="620" y1="175" x2="560" y2="295" stroke="#30363d" stroke-width="1.5"/>
+            <line x1="620" y1="175" x2="640" y2="295" stroke="#30363d" stroke-width="1.5"/>
+            <line x1="620" y1="175" x2="710" y2="295" stroke="#30363d" stroke-width="1.5"/>
+            <!-- Core firewall -->
+            <circle cx="380" cy="60" r="26" fill="#1f6feb" stroke="#2f81f7" stroke-width="2"/>
+            <text x="380" y="56" fill="#fff" font-size="10" text-anchor="middle" font-weight="700">CORE</text>
+            <text x="380" y="68" fill="#fff" font-size="10" text-anchor="middle">FW-1</text>
+            <text x="380" y="100" fill="#8b949e" font-size="11" text-anchor="middle">Core-FW-1 · DC</text>
+            <!-- SW-A1 (up) -->
+            <rect x="110" y="155" width="60" height="40" rx="6" fill="#161b22" stroke="#3fb950" stroke-width="2"/>
+            <text x="140" y="180" fill="#e6edf3" font-size="11" text-anchor="middle" font-weight="600">SW-A1</text>
+            <text x="140" y="210" fill="#8b949e" font-size="11" text-anchor="middle">Bldg A</text>
+            <!-- SW-B2 (down) -->
+            <rect x="350" y="155" width="60" height="40" rx="6" fill="#161b22" stroke="#f85149" stroke-width="2"/>
+            <text x="380" y="180" fill="#f85149" font-size="11" text-anchor="middle" font-weight="600">SW-B2</text>
+            <text x="380" y="210" fill="#f85149" font-size="11" text-anchor="middle">DOWN</text>
+            <!-- SW-C1 (up) -->
+            <rect x="590" y="155" width="60" height="40" rx="6" fill="#161b22" stroke="#3fb950" stroke-width="2"/>
+            <text x="620" y="180" fill="#e6edf3" font-size="11" text-anchor="middle" font-weight="600">SW-C1</text>
+            <text x="620" y="210" fill="#8b949e" font-size="11" text-anchor="middle">Bldg C</text>
+            <!-- Bldg A APs -->
+            <circle cx="80"  cy="305" r="16" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
+            <text x="80"  cy="309" fill="#e6edf3" font-size="9" text-anchor="middle" dy="4">AP-A1</text>
+            <circle cx="190" cy="305" r="16" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
+            <text x="190" cy="309" fill="#e6edf3" font-size="9" text-anchor="middle" dy="4">AP-A2</text>
+            <circle cx="260" cy="305" r="16" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
+            <text x="260" cy="309" fill="#e6edf3" font-size="9" text-anchor="middle" dy="4">AP-A3</text>
+            <!-- Bldg B APs (suppressed) -->
+            <circle cx="330" cy="305" r="16" fill="#161b22" stroke="#6e7681" stroke-width="1.5" stroke-dasharray="4,2"/>
+            <text x="330" cy="309" fill="#6e7681" font-size="9" text-anchor="middle" dy="4">AP-B1</text>
+            <circle cx="430" cy="305" r="16" fill="#161b22" stroke="#6e7681" stroke-width="1.5" stroke-dasharray="4,2"/>
+            <text x="430" cy="309" fill="#6e7681" font-size="9" text-anchor="middle" dy="4">AP-B2</text>
+            <!-- Bldg C APs -->
+            <circle cx="560" cy="305" r="16" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
+            <text x="560" cy="309" fill="#e6edf3" font-size="9" text-anchor="middle" dy="4">AP-C1</text>
+            <circle cx="640" cy="305" r="16" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
+            <text x="640" cy="309" fill="#e6edf3" font-size="9" text-anchor="middle" dy="4">AP-C2</text>
+            <circle cx="710" cy="305" r="16" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
+            <text x="710" cy="309" fill="#e6edf3" font-size="9" text-anchor="middle" dy="4">AP-C3</text>
+            <!-- Legend -->
+            <rect x="20" y="380" width="12" height="12" rx="2" fill="none" stroke="#3fb950" stroke-width="1.5"/>
+            <text x="38" y="391" fill="#8b949e" font-size="11">Up</text>
+            <rect x="80" y="380" width="12" height="12" rx="2" fill="none" stroke="#f85149" stroke-width="1.5"/>
+            <text x="98" y="391" fill="#8b949e" font-size="11">Down</text>
+            <line x1="150" y1="386" x2="175" y2="386" stroke="#f85149" stroke-width="2" stroke-dasharray="4,2"/>
+            <text x="182" y="391" fill="#8b949e" font-size="11">Degraded link</text>
+            <circle cx="265" cy="386" r="6" fill="none" stroke="#6e7681" stroke-width="1.5" stroke-dasharray="3,2"/>
+            <text x="276" y="391" fill="#8b949e" font-size="11">Suppressed (root-cause)</text>
+          </svg>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ FLOOR PLAN ══════════ -->
+    <div class="view" id="view-floorplan">
+      <div style="display:flex;gap:10px;margin-bottom:14px;align-items:center;flex-wrap:wrap">
+        <select class="form-select" style="width:200px">
+          <option>Building A — Floor 1</option>
+          <option>Building A — Floor 2</option>
+          <option>Building B — Floor 1</option>
+          <option>Building C — Floor 1</option>
+        </select>
+        <button class="btn btn-sm">Wi-Fi Heatmap</button>
+        <button class="btn btn-sm" onclick="alert('Drop a device on the map to place it.')">+ Place Device</button>
+      </div>
+      <div class="card">
+        <div class="card-body" style="padding:0">
+          <div class="floorplan-wrap">
+            <svg class="floorplan-svg" viewBox="0 0 700 420">
+              <rect x="20" y="20" width="660" height="380" rx="8" fill="#1c2128" stroke="#30363d" stroke-width="1.5"/>
+              <rect x="40" y="40" width="180" height="150" rx="4" fill="#21262d" stroke="#3d444d"/>
+              <text x="130" y="122" fill="#6e7681" font-size="12" text-anchor="middle">Office A1</text>
+              <rect x="240" y="40" width="200" height="150" rx="4" fill="#21262d" stroke="#3d444d"/>
+              <text x="340" y="122" fill="#6e7681" font-size="12" text-anchor="middle">Conference Room</text>
+              <rect x="460" y="40" width="200" height="150" rx="4" fill="#21262d" stroke="#3d444d"/>
+              <text x="560" y="122" fill="#6e7681" font-size="12" text-anchor="middle">Office A2</text>
+              <rect x="40" y="220" width="260" height="160" rx="4" fill="#21262d" stroke="#3d444d"/>
+              <text x="170" y="308" fill="#6e7681" font-size="12" text-anchor="middle">Lab / Server Room</text>
+              <rect x="320" y="220" width="340" height="160" rx="4" fill="#21262d" stroke="#3d444d"/>
+              <text x="490" y="308" fill="#6e7681" font-size="12" text-anchor="middle">Open Area</text>
+              <!-- Coverage -->
+              <circle cx="130" cy="88" r="75" fill="rgba(63,185,80,.06)" stroke="rgba(63,185,80,.12)" stroke-width="1"/>
+              <circle cx="340" cy="88" r="85" fill="rgba(63,185,80,.06)" stroke="rgba(63,185,80,.12)" stroke-width="1"/>
+              <circle cx="560" cy="88" r="75" fill="rgba(63,185,80,.06)" stroke="rgba(63,185,80,.12)" stroke-width="1"/>
+              <circle cx="490" cy="300" r="95" fill="rgba(63,185,80,.06)" stroke="rgba(63,185,80,.12)" stroke-width="1"/>
+              <!-- Devices -->
+              <g class="fp-device" onclick="showDeviceInfo('AP-A-01','Access Point','192.168.1.21','Up','12 clients')">
+                <circle cx="130" cy="88" r="11" fill="#161b22" stroke="#3fb950" stroke-width="2"/>
+                <text x="130" y="92" fill="#3fb950" font-size="9" text-anchor="middle" font-weight="700">AP</text>
+                <text x="130" y="108" fill="#8b949e" font-size="10" text-anchor="middle">AP-A-01</text>
+              </g>
+              <g class="fp-device" onclick="showDeviceInfo('AP-A-02','Access Point','192.168.1.22','Up','8 clients')">
+                <circle cx="340" cy="88" r="11" fill="#161b22" stroke="#3fb950" stroke-width="2"/>
+                <text x="340" y="92" fill="#3fb950" font-size="9" text-anchor="middle" font-weight="700">AP</text>
+                <text x="340" y="108" fill="#8b949e" font-size="10" text-anchor="middle">AP-A-02</text>
+              </g>
+              <g class="fp-device" onclick="showDeviceInfo('AP-A-03','Access Point','192.168.1.23','Up','15 clients')">
+                <circle cx="560" cy="88" r="11" fill="#161b22" stroke="#3fb950" stroke-width="2"/>
+                <text x="560" y="92" fill="#3fb950" font-size="9" text-anchor="middle" font-weight="700">AP</text>
+                <text x="560" y="108" fill="#8b949e" font-size="10" text-anchor="middle">AP-A-03</text>
+              </g>
+              <g class="fp-device" onclick="showDeviceInfo('SW-A1','Switch','192.168.1.10','Up','24 ports, 18 up')">
+                <rect x="155" y="270" width="30" height="22" rx="4" fill="#161b22" stroke="#3fb950" stroke-width="2"/>
+                <text x="170" y="284" fill="#3fb950" font-size="8" text-anchor="middle" font-weight="700">SW</text>
+                <text x="170" y="304" fill="#8b949e" font-size="10" text-anchor="middle">SW-A1</text>
+              </g>
+              <g class="fp-device" onclick="showDeviceInfo('AP-A-04','Access Point','192.168.1.24','Up','21 clients')">
+                <circle cx="490" cy="300" r="11" fill="#161b22" stroke="#3fb950" stroke-width="2"/>
+                <text x="490" y="304" fill="#3fb950" font-size="9" text-anchor="middle" font-weight="700">AP</text>
+                <text x="490" y="320" fill="#8b949e" font-size="10" text-anchor="middle">AP-A-04</text>
+              </g>
+            </svg>
+            <div class="fp-tooltip hidden" id="fp-tooltip"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ CLIENTS ══════════ -->
+    <div class="view" id="view-clients">
+      <div class="kpi-row" style="grid-template-columns:repeat(3,1fr)">
+        <div class="kpi kpi-info"><div class="kpi-label">Online Now</div><div class="kpi-value">186</div><div class="kpi-sub">across 23 APs</div></div>
+        <div class="kpi"><div class="kpi-label">Rogue / Unknown</div><div class="kpi-value" style="color:var(--warn)">1</div><div class="kpi-sub">unrecognized MAC</div></div>
+        <div class="kpi"><div class="kpi-label">Avg Session</div><div class="kpi-value" style="color:var(--info)">4.2h</div><div class="kpi-sub">today</div></div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          Client Activity
+          <div class="card-header-actions">
+            <input class="form-input" style="width:200px;padding:4px 8px;font-size:12px" placeholder="Search MAC / hostname…">
+          </div>
+        </div>
+        <div style="overflow-x:auto">
+          <table class="tbl">
+            <thead><tr><th>Hostname / MAC</th><th>IP</th><th>AP</th><th>Building</th><th>Signal</th><th>Tx/Rx</th><th>First Seen</th><th>Last Active</th><th>Status</th></tr></thead>
+            <tbody id="clients-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ TRAFFIC ══════════ -->
+    <div class="view" id="view-traffic">
+      <div class="grid-2" style="margin-bottom:14px">
+        <div class="card">
+          <div class="card-header">Traffic by Application (Top 10)</div>
+          <div class="card-body"><canvas id="appTrafficChart" height="220"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-header">Top Clients by Bandwidth</div>
+          <div class="card-body">
+            <table class="tbl">
+              <thead><tr><th>#</th><th>Client</th><th>Down</th><th>Up</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><td>LAPTOP-ADMIN-01</td><td>2.4 GB</td><td>820 MB</td></tr>
+                <tr><td>2</td><td>DESKTOP-LAB-04</td><td>1.9 GB</td><td>240 MB</td></tr>
+                <tr><td>3</td><td>iPhone-B4:7E:F1</td><td>1.1 GB</td><td>180 MB</td></tr>
+                <tr><td>4</td><td>WORKSTATION-C2</td><td>940 MB</td><td>310 MB</td></tr>
+                <tr><td>5</td><td>MacBook-9A:21:CD</td><td>880 MB</td><td>420 MB</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header">WAN / Interface Utilization</div>
+        <div class="card-body"><canvas id="ifaceChart" height="110"></canvas></div>
+      </div>
+    </div>
+
+    <!-- ══════════ SLA ══════════ -->
+    <div class="view" id="view-sla">
+      <div class="card">
+        <div class="card-header">SLA / Uptime — Last 30 Days</div>
+        <div style="overflow-x:auto">
+          <table class="tbl">
+            <thead><tr><th>Device / Service</th><th>Building</th><th>Uptime</th><th>Downtime</th><th>Incidents</th><th>SLA Target</th><th>Status</th><th>30-Day Bar</th></tr></thead>
+            <tbody id="sla-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ LIFECYCLE ══════════ -->
+    <div class="view" id="view-lifecycle">
+      <div class="card">
+        <div class="card-header">Device Lifecycle Tracking</div>
+        <div style="overflow-x:auto">
+          <table class="tbl">
+            <thead><tr><th>Device</th><th>Model</th><th>Firmware</th><th>Latest FW</th><th>Warranty</th><th>EOM</th><th>EOL</th><th>Status</th></tr></thead>
+            <tbody id="lifecycle-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ CONFIG BACKUP ══════════ -->
+    <div class="view" id="view-config">
+      <div class="grid-70-30">
+        <div class="card">
+          <div class="card-header">
+            Config Backup History
+            <div class="card-header-actions">
+              <button class="btn btn-primary btn-sm" onclick="alert('Backup triggered for all devices…')">⟳ Backup All</button>
+            </div>
+          </div>
+          <div style="overflow-x:auto">
+            <table class="tbl">
+              <thead><tr><th>Device</th><th>Timestamp</th><th>Size</th><th>Changed</th><th>By</th><th>Actions</th></tr></thead>
+              <tbody id="config-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header">Change Diff Preview</div>
+          <div class="card-body">
+            <div style="background:var(--surface2);border-radius:var(--r);padding:12px;font-family:var(--mono);font-size:12px;line-height:1.7">
+              <div style="color:var(--text3);margin-bottom:8px">Core-FW-1 — Nov 03 → Nov 04</div>
+              <div style="color:var(--crit)">- ip route 0.0.0.0/0 203.0.113.1</div>
+              <div style="color:var(--ok)">+ ip route 0.0.0.0/0 203.0.113.2</div>
+              <div style="color:var(--ok)">+ ip route 0.0.0.0/0 203.0.114.1 10</div>
+              <div style="margin-top:8px;color:var(--text3)">— snmp —</div>
+              <div style="color:var(--crit)">- snmp-server community public RO</div>
+              <div style="color:var(--ok)">+ snmp-server community nw2026 RO</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ REPORTS ══════════ -->
+    <div class="view" id="view-reports">
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header">Scheduled Reports</div>
+          <div class="card-body">
+            <table class="tbl">
+              <thead><tr><th>Report</th><th>Schedule</th><th>Recipients</th><th>Last Sent</th><th></th></tr></thead>
+              <tbody>
+                <tr><td>Weekly Uptime Summary</td><td>Mon 08:00</td><td>admin@dnsc.edu.ph</td><td>Oct 28</td><td><button class="btn btn-sm">▶ Run</button></td></tr>
+                <tr><td>Monthly SLA Report</td><td>1st of month</td><td>it-team@dnsc.edu.ph</td><td>Nov 1</td><td><button class="btn btn-sm">▶ Run</button></td></tr>
+                <tr><td>Daily Alert Digest</td><td>Daily 07:00</td><td>oncall@dnsc.edu.ph</td><td>Today 07:00</td><td><button class="btn btn-sm">▶ Run</button></td></tr>
+              </tbody>
+            </table>
+            <button class="btn btn-primary" style="margin-top:14px" onclick="openNewReport()">+ New Report</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header">Templates</div>
+          <div class="card-body">
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:center;gap:10px;padding:10px;background:var(--surface2);border-radius:var(--r)">
+                <span style="font-size:18px">📊</span>
+                <div><div style="font-weight:500">Executive SLA Summary</div><div style="font-size:12px;color:var(--text3)">Uptime, incidents, top issues</div></div>
+                <button class="btn btn-sm" style="margin-left:auto" onclick="openNewReport()">Use</button>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px;padding:10px;background:var(--surface2);border-radius:var(--r)">
+                <span style="font-size:18px">🔔</span>
+                <div><div style="font-weight:500">Alert Trends Report</div><div style="font-size:12px;color:var(--text3)">Frequency, MTTR, top offenders</div></div>
+                <button class="btn btn-sm" style="margin-left:auto" onclick="openNewReport()">Use</button>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px;padding:10px;background:var(--surface2);border-radius:var(--r)">
+                <span style="font-size:18px">📶</span>
+                <div><div style="font-weight:500">Wireless Client Report</div><div style="font-size:12px;color:var(--text3)">Client counts, top users, AP load</div></div>
+                <button class="btn btn-sm" style="margin-left:auto" onclick="openNewReport()">Use</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ SETTINGS ══════════ -->
+    <div class="view" id="view-settings">
+      <div class="tabs" id="settings-tabs">
+        <div class="tab active" onclick="switchSettingsTab(this,'notif')">Notifications</div>
+        <div class="tab" onclick="switchSettingsTab(this,'roles')">Roles & Access</div>
+        <div class="tab" onclick="switchSettingsTab(this,'maint')">Maintenance</div>
+        <div class="tab" onclick="switchSettingsTab(this,'disc')">Discovery</div>
+        <div class="tab" onclick="switchSettingsTab(this,'integrations')">Integrations</div>
+      </div>
+
+      <!-- Notifications tab -->
+      <div id="stab-notif">
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-header">Notification Channels</div>
+            <div class="card-body">
+              <div style="display:flex;flex-direction:column;gap:14px">
+                <div class="toggle-wrap"><label class="toggle"><input type="checkbox" checked><span class="toggle-slider"></span></label><div><div style="font-weight:500">Email</div><div style="font-size:12px;color:var(--text3)">admin@dnsc.edu.ph</div></div></div>
+                <div class="toggle-wrap"><label class="toggle"><input type="checkbox" checked><span class="toggle-slider"></span></label><div><div style="font-weight:500">Telegram</div><div style="font-size:12px;color:var(--text3)">@nw_alerts_bot → #netwatch-alerts</div></div></div>
+                <div class="toggle-wrap"><label class="toggle"><input type="checkbox" checked><span class="toggle-slider"></span></label><div><div style="font-weight:500">Slack</div><div style="font-size:12px;color:var(--text3)">#network-ops workspace</div></div></div>
+                <div class="toggle-wrap"><label class="toggle"><input type="checkbox"><span class="toggle-slider"></span></label><div><div style="font-weight:500">SMS</div><div style="font-size:12px;color:var(--text3)">Not configured</div></div></div>
+                <div class="toggle-wrap"><label class="toggle"><input type="checkbox"><span class="toggle-slider"></span></label><div><div style="font-weight:500">Webhook</div><div style="font-size:12px;color:var(--text3)">Not configured</div></div></div>
+                <div class="toggle-wrap"><label class="toggle"><input type="checkbox"><span class="toggle-slider"></span></label><div><div style="font-weight:500">Microsoft Teams</div><div style="font-size:12px;color:var(--text3)">Not configured</div></div></div>
+              </div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">Alert Thresholds</div>
+            <div class="card-body">
+              <div class="form-group"><label class="form-label">CPU Warning (%)</label><input class="form-input" type="number" value="80"></div>
+              <div class="form-group"><label class="form-label">CPU Critical (%)</label><input class="form-input" type="number" value="95"></div>
+              <div class="form-group"><label class="form-label">Latency Warning (ms)</label><input class="form-input" type="number" value="100"></div>
+              <div class="form-group"><label class="form-label">Latency Critical (ms)</label><input class="form-input" type="number" value="250"></div>
+              <div class="form-group"><label class="form-label">Flap Detection (changes / 5 min)</label><input class="form-input" type="number" value="3"></div>
+              <button class="btn btn-primary" onclick="alert('Thresholds saved!')">Save Thresholds</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Roles tab -->
+      <div id="stab-roles" class="hidden">
+        <div class="card">
+          <div class="card-header">User Roles <div class="card-header-actions"><button class="btn btn-primary btn-sm" onclick="openAddUser()">+ Add User</button></div></div>
+          <div style="overflow-x:auto">
+            <table class="tbl">
+              <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Building Access</th><th>MFA</th><th>Last Login</th><th></th></tr></thead>
+              <tbody>
+                <tr><td><strong>Barbie Admin</strong></td><td>penafiel.barbie@dnsc.edu.ph</td><td><span class="chip chip-info">Main Admin</span></td><td>All sites</td><td><span class="chip chip-ok">On</span></td><td>Just now</td><td><button class="btn btn-sm">Edit</button></td></tr>
+                <tr><td>Juan dela Cruz</td><td>jdelacruz@dnsc.edu.ph</td><td><span class="chip chip-warn">Admin</span></td><td>Building A, C</td><td><span class="chip chip-ok">On</span></td><td>2h ago</td><td><button class="btn btn-sm">Edit</button></td></tr>
+                <tr><td>Maria Santos</td><td>msantos@dnsc.edu.ph</td><td><span class="chip chip-off">Viewer</span></td><td>Building B</td><td><span class="chip chip-off">Off</span></td><td>1d ago</td><td><button class="btn btn-sm">Edit</button></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Maintenance tab -->
+      <div id="stab-maint" class="hidden">
+        <div class="card">
+          <div class="card-header">Maintenance Windows <div class="card-header-actions"><button class="btn btn-primary btn-sm" onclick="openMaintenance()">+ New Window</button></div></div>
+          <div style="overflow-x:auto">
+            <table class="tbl">
+              <thead><tr><th>Name</th><th>Devices</th><th>Start</th><th>End</th><th>Recurrence</th><th>Status</th><th></th></tr></thead>
+              <tbody>
+                <tr><td>Weekly Patch Night</td><td>All switches</td><td>Sat 23:00</td><td>Sun 03:00</td><td>Weekly</td><td><span class="chip chip-maint">Scheduled</span></td><td><button class="btn btn-sm">Edit</button></td></tr>
+                <tr><td>Bldg B UPS Replacement</td><td>SW-B2, AP-B-01</td><td>2026-11-06 08:00</td><td>2026-11-06 12:00</td><td>Once</td><td><span class="chip chip-warn">Upcoming</span></td><td><button class="btn btn-sm">Edit</button></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Discovery tab -->
+      <div id="stab-disc" class="hidden">
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-header">Network Discovery</div>
+            <div class="card-body">
+              <div class="form-group"><label class="form-label">Subnet Range</label><input class="form-input" value="192.168.0.0/16"></div>
+              <div class="form-group"><label class="form-label">SNMP Community</label><input class="form-input" value="nw2026" type="password"></div>
+              <div class="form-group"><label class="form-label">Polling Interval</label><select class="form-select"><option>1 second</option><option selected>30 seconds</option><option>1 minute</option><option>5 minutes</option></select></div>
+              <button class="btn btn-primary" onclick="alert('Discovery started on 192.168.0.0/16…')">Start Discovery</button>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">Rogue Device Alerts</div>
+            <div class="card-body">
+              <div class="form-group"><div class="toggle-wrap"><label class="toggle"><input type="checkbox" checked><span class="toggle-slider"></span></label><span>Alert on unknown MAC addresses</span></div></div>
+              <div class="form-group"><div class="toggle-wrap"><label class="toggle"><input type="checkbox" checked><span class="toggle-slider"></span></label><span>Auto-quarantine rogue devices</span></div></div>
+              <div style="background:rgba(210,153,34,.08);border:1px solid rgba(210,153,34,.2);border-radius:var(--r);padding:10px;font-size:13px;margin-top:8px">
+                <strong style="color:var(--warn)">1 unknown MAC detected</strong><br>
+                <span style="color:var(--text2)">E4:5F:01:9D:72:AB — Building B</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Integrations tab -->
+      <div id="stab-integrations" class="hidden">
+        <div class="grid-3">
+          <div class="card"><div class="card-body" style="display:flex;flex-direction:column;gap:12px"><div style="font-size:18px">🎫</div><div style="font-weight:600">Ticketing Webhook</div><div style="font-size:12px;color:var(--text3)">Auto-create tickets on critical alerts</div><input class="form-input" placeholder="https://your-psa.example/api/tickets"><button class="btn btn-sm" onclick="alert('Webhook saved!')">Save</button></div></div>
+          <div class="card"><div class="card-body" style="display:flex;flex-direction:column;gap:12px"><div style="font-size:18px">☸</div><div style="font-weight:600">Kubernetes</div><div style="font-size:12px;color:var(--text3)">Monitor cluster nodes and services</div><input class="form-input" placeholder="kubeconfig or API server URL"><button class="btn btn-sm" onclick="alert('Connecting to cluster…')">Connect</button></div></div>
+          <div class="card"><div class="card-body" style="display:flex;flex-direction:column;gap:12px"><div style="font-size:18px">📡</div><div style="font-weight:600">JSON-RPC API</div><div style="font-size:12px;color:var(--text3)">External access via API tokens</div><code style="background:var(--surface2);padding:6px 8px;border-radius:var(--r);display:block;word-break:break-all;font-family:var(--mono);font-size:11px">nw_tok_abc123def456</code><button class="btn btn-sm" onclick="alert('Token regenerated!')">Regenerate</button></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════ AUDIT LOG ══════════ -->
+    <div class="view" id="view-auditlog">
+      <div style="display:flex;gap:10px;margin-bottom:14px">
+        <input class="form-input" style="width:220px" placeholder="Search log…">
+        <select class="form-select" style="width:160px">
+          <option>All actions</option>
+          <option>Config changes</option>
+          <option>Alert actions</option>
+          <option>User actions</option>
+          <option>Logins</option>
+        </select>
+      </div>
+      <div class="card">
+        <div style="overflow-x:auto">
+          <table class="tbl">
+            <thead><tr><th>Timestamp</th><th>User</th><th>IP</th><th>Action</th><th>Object</th><th>Before</th><th>After</th></tr></thead>
+            <tbody id="audit-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /content -->
+</div><!-- /main -->
+</div><!-- /app -->
+
+<!-- Modal -->
+<div class="modal-overlay hidden" id="modal-overlay">
+  <div class="modal">
+    <div class="modal-header">
+      <span id="modal-title"></span>
+      <button class="modal-close" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-footer" id="modal-footer"></div>
+  </div>
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

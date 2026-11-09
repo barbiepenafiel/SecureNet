@@ -1,0 +1,19 @@
+{
+  "name": "netwatch-snmp-poller",
+  "version": "1.0.0",
+  "description": "SNMP poller — writes traffic samples to Supabase",
+  "main": "poller.js",
+  "scripts": {
+    "start": "node poller.js",
+    "sim": "POLL_MODE=sim node poller.js",
+    "vm": "POLL_MODE=vm  node poller.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "dotenv": "^16.4.5",
+    "net-snmp": "^3.11.4"
+  },
+  "devDependencies": {
+    "pg": "^8.23.1"
+  }
+}

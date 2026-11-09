@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 520">
+  <rect width="920" height="520" fill="#c8c8c8"/>
+
+  <!-- Room fills -->
+  <rect x="30" y="30" width="860" height="440" fill="white"/>
+  <!-- Hallway strip -->
+  <rect x="30" y="215" width="860" height="60" fill="#efefef"/>
+  <!-- Stairs 1 fill -->
+  <rect x="300" y="275" width="90" height="195" fill="#e2e2e2"/>
+  <!-- Stairs 2 fill -->
+  <rect x="800" y="275" width="90" height="195" fill="#e2e2e2"/>
+
+  <!-- Inner walls -->
+  <line x1="30"  y1="215" x2="890" y2="215" stroke="#111" stroke-width="5"/>
+  <line x1="30"  y1="275" x2="890" y2="275" stroke="#111" stroke-width="5"/>
+  <line x1="345" y1="30"  x2="345" y2="215" stroke="#111" stroke-width="5"/>
+  <line x1="610" y1="30"  x2="610" y2="215" stroke="#111" stroke-width="5"/>
+  <line x1="300" y1="275" x2="300" y2="470" stroke="#111" stroke-width="5"/>
+  <line x1="390" y1="275" x2="390" y2="470" stroke="#111" stroke-width="5"/>
+  <line x1="800" y1="275" x2="800" y2="470" stroke="#111" stroke-width="5"/>
+
+  <!-- Outer wall -->
+  <rect x="30" y="30" width="860" height="440" fill="none" stroke="#111" stroke-width="11"/>
+
+  <!-- === TOP WALL (y=215): Rooms → Hallway, open DOWN into hallway === -->
+
+  <!-- Faculty/Accreditation double door at divider x=345 — open INTO rooms (upward) -->
+  <!-- Faculty side: hinge RIGHT at x=340, gap x=300-340 -->
+  <rect x="300" y="212" width="40" height="6" fill="white"/>
+  <rect x="337" y="175" width="3" height="40" fill="white" stroke="#111" stroke-width="1"/>
+  <path d="M 300 215 A 40 40 0 0 1 340 175" fill="none" stroke="#111" stroke-width="1.5"/>
+
+  <!-- Accreditation side: hinge LEFT at x=350, gap x=350-390 -->
+  <rect x="350" y="212" width="40" height="6" fill="white"/>
+  <rect x="350" y="175" width="3" height="40" fill="white" stroke="#111" stroke-width="1"/>
+  <path d="M 390 215 A 40 40 0 0 0 350 175" fill="none" stroke="#111" stroke-width="1.5"/>
+
+  <!-- Accreditation right door (x=540-580) — open INTO room (upward) -->
+  <rect x="540" y="212" width="40" height="6" fill="white"/>
+  <rect x="540" y="175" width="3" height="40" fill="white" stroke="#111" stroke-width="1"/>
+  <path d="M 580 215 A 40 40 0 0 0 540 175" fill="none" stroke="#111" stroke-width="1.5"/>
+
+  <!-- Netlab door (x=795-835) — open INTO room (upward) -->
+  <rect x="795" y="212" width="40" height="6" fill="white"/>
+  <rect x="795" y="175" width="3" height="40" fill="white" stroke="#111" stroke-width="1"/>
+  <path d="M 835 215 A 40 40 0 0 0 795 175" fill="none" stroke="#111" stroke-width="1.5"/>
+
+
+  <!-- === BOTTOM WALL (y=275): Hallway → Rooms, open DOWN into rooms === -->
+
+  <!-- Faculty bottom door (x=215-255) -->
+  <rect x="215" y="272" width="40" height="6" fill="white"/>
+  <rect x="215" y="275" width="3" height="40" fill="white" stroke="#111" stroke-width="1"/>
+  <path d="M 255 275 A 40 40 0 0 1 215 315" fill="none" stroke="#111" stroke-width="1.5"/>
+
+  <!-- Comlab 1, door A – left (x=405-445) -->
+  <rect x="405" y="272" width="40" height="6" fill="white"/>
+  <rect x="405" y="275" width="3" height="40" fill="white" stroke="#111" stroke-width="1"/>
+  <path d="M 445 275 A 40 40 0 0 1 405 315" fill="none" stroke="#111" stroke-width="1.5"/>
+
+  <!-- Comlab 1, door B – right (x=755-795) -->
+  <rect x="755" y="272" width="40" height="6" fill="white"/>
+  <rect x="755" y="275" width="3" height="40" fill="white" stroke="#111" stroke-width="1"/>
+  <path d="M 795 275 A 40 40 0 0 1 755 315" fill="none" stroke="#111" stroke-width="1.5"/>
+
+  <!-- Stairs 1 hatching -->
+  <line x1="315" y1="278" x2="315" y2="467" stroke="#aaa" stroke-width="1.5"/>
+  <line x1="330" y1="278" x2="330" y2="467" stroke="#aaa" stroke-width="1.5"/>
+  <line x1="345" y1="278" x2="345" y2="467" stroke="#aaa" stroke-width="1.5"/>
+  <line x1="360" y1="278" x2="360" y2="467" stroke="#aaa" stroke-width="1.5"/>
+  <line x1="375" y1="278" x2="375" y2="467" stroke="#aaa" stroke-width="1.5"/>
+
+  <!-- Stairs 1 direction arrows -->
+  <polygon points="345,330 340,342 350,342" fill="#888"/>
+  <line x1="345" y1="342" x2="345" y2="400" stroke="#888" stroke-width="1.5"/>
+  <polygon points="345,410 340,398 350,398" fill="#888"/>
+
+  <!-- Stairs 2 hatching -->
+  <line x1="815" y1="278" x2="815" y2="467" stroke="#aaa" stroke-width="1.5"/>
+  <line x1="830" y1="278" x2="830" y2="467" stroke="#aaa" stroke-width="1.5"/>
+  <line x1="845" y1="278" x2="845" y2="467" stroke="#aaa" stroke-width="1.5"/>
+  <line x1="860" y1="278" x2="860" y2="467" stroke="#aaa" stroke-width="1.5"/>
+  <line x1="875" y1="278" x2="875" y2="467" stroke="#aaa" stroke-width="1.5"/>
+
+  <!-- Stairs 2 direction arrows -->
+  <polygon points="845,330 840,342 850,342" fill="#888"/>
+  <line x1="845" y1="342" x2="845" y2="400" stroke="#888" stroke-width="1.5"/>
+  <polygon points="845,410 840,398 850,398" fill="#888"/>
+
+  <!-- Hallway label -->
+  <text x="460" y="245" font-family="Arial,Helvetica,sans-serif" font-size="13" font-weight="bold" text-anchor="middle" dominant-baseline="middle" fill="#888">Hallway</text>
+
+  <!-- Room labels -->
+  <text x="187" y="122" font-family="Arial,Helvetica,sans-serif" font-size="16" font-weight="bold" text-anchor="middle" dominant-baseline="middle" fill="#111">FACULTY 1</text>
+  <text x="477" y="114" font-family="Arial,Helvetica,sans-serif" font-size="14" font-weight="bold" text-anchor="middle" dominant-baseline="middle" fill="#111">ACCREDITATION</text>
+  <text x="477" y="132" font-family="Arial,Helvetica,sans-serif" font-size="14" font-weight="bold" text-anchor="middle" dominant-baseline="middle" fill="#111">ROOM</text>
+  <text x="750" y="122" font-family="Arial,Helvetica,sans-serif" font-size="16" font-weight="bold" text-anchor="middle" dominant-baseline="middle" fill="#111">NETLAB</text>
+
+  <text x="165" y="372" font-family="Arial,Helvetica,sans-serif" font-size="16" font-weight="bold" text-anchor="middle" dominant-baseline="middle" fill="#111">FACULTY 2</text>
+  <text x="345" y="372" font-family="Arial,Helvetica,sans-serif" font-size="11" text-anchor="middle" dominant-baseline="middle" fill="#555" transform="rotate(-90,345,372)">S T A I R S</text>
+  <text x="595" y="372" font-family="Arial,Helvetica,sans-serif" font-size="16" font-weight="bold" text-anchor="middle" dominant-baseline="middle" fill="#111">COMLAB 1</text>
+  <text x="845" y="372" font-family="Arial,Helvetica,sans-serif" font-size="11" text-anchor="middle" dominant-baseline="middle" fill="#555" transform="rotate(-90,845,372)">S T A I R S</text>
+
+  <!-- Floor title -->
+  <text x="460" y="488" font-family="Arial,Helvetica,sans-serif" font-size="17" font-weight="bold" text-anchor="middle" fill="#111">GROUND FLOOR PLAN</text>
+  <text x="460" y="508" font-family="Arial,Helvetica,sans-serif" font-size="12" text-anchor="middle" fill="#555">IC BUILDING — DNSC</text>
+</svg>
