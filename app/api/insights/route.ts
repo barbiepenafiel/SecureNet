@@ -9,7 +9,7 @@ function adminDb() {
   )
 }
 
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
+function withTimeout<T>(p: PromiseLike<T>, ms: number): Promise<T | null> {
   return Promise.race([p, new Promise<null>(res => setTimeout(() => res(null), ms))])
 }
 
