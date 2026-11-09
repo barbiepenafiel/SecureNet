@@ -5,6 +5,7 @@
   "main": "poller.js",
   "scripts": {
     "start": "node poller.js",
+    "agent": "node agent.js",
     "sim": "POLL_MODE=sim node poller.js",
     "vm": "POLL_MODE=vm  node poller.js"
   },
