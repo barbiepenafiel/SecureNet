@@ -6,7 +6,7 @@
  *
  * Every 60 s  — ping every device in the `devices` table → update status
  * Every 60 s  — SNMP poll SNMP-enabled devices → traffic_samples, cpu, mem
- * Every 5 min — network scan (ipconfig + arp + ping sweep) → scan_results
+ * Every 15 s  — network scan (ping sweep + verified ARP) → scan_results
  *
  * Usage:
  *   cd poller
@@ -14,6 +14,7 @@
  */
 
 const path   = require('path')
+const os     = require('os')
 const { exec }  = require('child_process')
 const { promisify } = require('util')
 
@@ -35,65 +36,94 @@ const supabase = createClient(
 
 const PING_MS       = parseInt(process.env.PING_TIMEOUT_MS  ?? '500',   10)
 const POLL_MS       = parseInt(process.env.POLL_INTERVAL_MS ?? '60000', 10)
-const SCAN_MS       = parseInt(process.env.SCAN_INTERVAL_MS ?? '300000',10) // 5 min
-const SCAN_BATCH    = parseInt(process.env.SCAN_BATCH       ?? '30',    10)
+const SCAN_MS       = parseInt(process.env.SCAN_INTERVAL_MS ?? '15000', 10) // 15 s
+const SCAN_BATCH    = parseInt(process.env.SCAN_BATCH       ?? '64',    10)
+const MIN_PREFIX    = parseInt(process.env.SCAN_MIN_PREFIX  ?? '22',    10) // cap sweep at 1022 hosts
 const isWindows     = process.platform === 'win32'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+const ipToInt = ip => ip.split('.').reduce((a, o) => ((a << 8) | Number(o)) >>> 0, 0)
+const intToIp = n => [24, 16, 8, 0].map(s => (n >>> s) & 255).join('.')
+
 function pingHost(ip) {
   const cmd = isWindows
     ? `ping -n 1 -w ${PING_MS} ${ip}`
     : `ping -c 1 -W ${Math.ceil(PING_MS / 1000)} ${ip}`
   return execAsync(cmd, { timeout: PING_MS + 1000 })
     .then(({ stdout }) => {
-      const responded = stdout.includes('Reply from') || /TTL=/i.test(stdout) ||
-                        stdout.includes('1 received') || /time[<=]\d/i.test(stdout)
-      const m = stdout.match(/Average\s*=\s*(\d+)ms/) ??
-                stdout.match(/time[<=](\d+)ms/) ??
-                stdout.match(/time=(\d+\.?\d*)\s*ms/)
-      return { responded, latency_ms: m ? Math.round(parseFloat(m[1])) : responded ? 1 : null }
+      // A real echo reply comes FROM the target and carries a TTL. Windows also prints
+      // "Reply from <own IP>: Destination host unreachable" for dead hosts — not a reply.
+      const fromTarget = new RegExp(`from ${ip.replace(/\./g, '\\.')}(?!\\d)`).test(stdout)
+      const responded  = fromTarget && /ttl=/i.test(stdout)
+      const m = stdout.match(/time[=<]\s*(\d+(?:\.\d+)?)\s*ms/i)
+      return { responded, latency_ms: responded ? (m ? Math.round(parseFloat(m[1])) : 0) : null }
     })
     .catch(() => ({ responded: false, latency_ms: null }))
 }
 
-async function getArpTable() {
+// Neighbor (ARP) entries confirmed during the sweep. Every host in range is pinged first,
+// which forces the OS to re-verify each cached entry: dead ones turn Unreachable/Delay/Probe,
+// live ones are Reachable (or decay to Stale after confirmation). Old cache junk is excluded.
+async function getLiveNeighbors() {
   const map = new Map()
+  const add = (ip, mac) => {
+    mac = mac.replace(/-/g, ':').toUpperCase()
+    if (/^(00:){5}00$|^(FF:){5}FF$|^01:00:5E/.test(mac)) return
+    map.set(ip, mac)
+  }
   try {
-    const { stdout } = await execAsync('arp -a', { timeout: 5000 })
-    for (const line of stdout.split('\n')) {
-      const m = line.match(
-        /\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+((?:[\da-fA-F]{2}[-:]){5}[\da-fA-F]{2})\b/
-      )
-      if (m) map.set(m[1], m[2].replace(/-/g, ':').toUpperCase())
+    if (isWindows) {
+      const ps = "Get-NetNeighbor -AddressFamily IPv4 | Where-Object { $_.State -in 'Reachable','Stale' } | ForEach-Object { $_.IPAddress + ' ' + $_.LinkLayerAddress }"
+      const { stdout } = await execAsync(`powershell -NoProfile -Command "${ps}"`, { timeout: 15000 })
+      for (const line of stdout.split(/\r?\n/)) {
+        const [ip, mac] = line.trim().split(/\s+/)
+        if (ip && mac && /^(?:[\da-fA-F]{2}-){5}[\da-fA-F]{2}$/.test(mac)) add(ip, mac)
+      }
+    } else {
+      const { stdout } = await execAsync('ip -4 neigh show', { timeout: 5000 })
+      for (const line of stdout.split('\n')) {
+        const m = line.match(/^([\d.]+) .*lladdr ((?:[\da-f]{2}:){5}[\da-f]{2}) (REACHABLE|STALE)/i)
+        if (m) add(m[1], m[2])
+      }
     }
-  } catch {}
+  } catch (e) {
+    console.log(`  [scan] neighbor table unavailable: ${e.message}`)
+  }
   return map
 }
 
-async function detectSubnets() {
-  // Use the default gateway's subnet — the network this PC uses to reach the internet.
-  // This is always the correct campus network, even on multi-homed machines.
+// The network this PC actually uses to reach the internet, with its real prefix length
+// (school Wi-Fi is often /22 or larger, not /24).
+async function detectNetwork() {
+  let selfIp = null
   try {
     if (isWindows) {
-      // "route print 0.0.0.0" lists the default route; grab the gateway IP
-      const { stdout: routeOut } = await execAsync('route print 0.0.0.0', { timeout: 5000 })
-      const gwMatch = routeOut.match(/0\.0\.0\.0\s+0\.0\.0\.0\s+([\d.]+)/m)
-      if (gwMatch) {
-        const sub = gwMatch[1].split('.').slice(0, 3).join('.')
-        return [sub]
-      }
-      // Fallback: parse ipconfig for the gateway line
-      const { stdout: cfgOut } = await execAsync('ipconfig', { timeout: 5000 })
-      const gwLine = cfgOut.match(/Default Gateway[.\s]+:\s*([\d.]+)/i)
-      if (gwLine) return [gwLine[1].split('.').slice(0, 3).join('.')]
+      const { stdout } = await execAsync('route print -4 0.0.0.0', { timeout: 5000 })
+      const routes = [...stdout.matchAll(/^\s*0\.0\.0\.0\s+0\.0\.0\.0\s+([\d.]+)\s+([\d.]+)\s+(\d+)/gm)]
+        .sort((a, b) => Number(a[3]) - Number(b[3]))
+      selfIp = routes[0]?.[2] ?? null
     } else {
-      // Linux: "ip route show default" → "default via GATEWAY_IP dev IFACE"
-      const { stdout } = await execAsync('ip route show default', { timeout: 5000 })
-      const m = stdout.match(/default via ([\d.]+)/)
-      if (m) return [m[1].split('.').slice(0, 3).join('.')]
+      const { stdout } = await execAsync('ip -4 route get 1.1.1.1', { timeout: 5000 })
+      selfIp = stdout.match(/src ([\d.]+)/)?.[1] ?? null
     }
   } catch {}
-  return []
+  if (!selfIp) return null
+
+  const iface = Object.values(os.networkInterfaces()).flat()
+    .find(a => a && a.family === 'IPv4' && a.address === selfIp)
+  if (!iface?.cidr) return null
+
+  let prefix = Number(iface.cidr.split('/')[1])
+  if (prefix < MIN_PREFIX) {
+    console.log(`  [scan] network is /${prefix}; limiting sweep to the /${MIN_PREFIX} around ${selfIp}`)
+    prefix = MIN_PREFIX
+  }
+  const mask      = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0
+  const network   = (ipToInt(selfIp) & mask) >>> 0
+  const broadcast = (network | ~mask) >>> 0
+  const hosts = []
+  for (let n = network + 1; n < broadcast; n++) hosts.push(intToIp(n))
+  return { selfIp, cidr: `${intToIp(network)}/${prefix}`, hosts }
 }
 
 // ── SNMP ──────────────────────────────────────────────────────────────────────
@@ -227,53 +257,52 @@ async function pollSnmp() {
 
 // ── Job 3: Network scan ───────────────────────────────────────────────────────
 async function scanNetwork() {
-  const subnets = await detectSubnets()
-  if (!subnets.length) {
-    console.log('  [scan] no subnets detected')
+  const net = await detectNetwork()
+  if (!net) {
+    console.log('  [scan] no active network detected')
     return
   }
-  console.log(`  [scan] scanning ${subnets.join(', ')} …`)
+  const started = Date.now()
+  console.log(`  [scan] sweeping ${net.cidr} (${net.hosts.length} hosts) from ${net.selfIp} …`)
 
-  const arpTable = await getArpTable()
-
-  const allIps = []
-  for (const sub of subnets)
-    for (let i = 1; i <= 254; i++) allIps.push(`${sub}.${i}`)
-
-  // Ping in batches
   const icmpMap = new Map()
-  for (let i = 0; i < allIps.length; i += SCAN_BATCH) {
-    const batch = allIps.slice(i, i + SCAN_BATCH)
+  for (let i = 0; i < net.hosts.length; i += SCAN_BATCH) {
+    const batch = net.hosts.slice(i, i + SCAN_BATCH)
     const res = await Promise.all(batch.map(async ip => ({ ip, ...(await pingHost(ip)) })))
-    for (const r of res) icmpMap.set(r.ip, { responded: r.responded, latency_ms: r.latency_ms })
+    for (const r of res) icmpMap.set(r.ip, r)
   }
+
+  // Read neighbors AFTER the sweep so every entry has just been re-verified.
+  const neighbors = await getLiveNeighbors()
 
   const scanned_at = new Date().toISOString()
   const rows = []
-  for (const ip of allIps) {
-    const inArp = arpTable.has(ip)
-    const icmp  = icmpMap.get(ip)
-    if (!icmp?.responded && !inArp) continue
-    const mac = arpTable.get(ip) ?? null
+  for (const ip of net.hosts) {
+    const icmp = icmpMap.get(ip)
+    const mac  = neighbors.get(ip) ?? null
+    // Alive = answered the ping, or answered ARP (phones/PCs often block ping but must answer ARP).
+    if (!icmp?.responded && !mac) continue
     rows.push({
       ip,
       mac,
-      hostname:    null,
+      hostname:    ip === net.selfIp ? `${os.hostname()} (this agent)` : null,
       vendor:      null,
       device_type: null,
-      scan_type:   icmp?.responded && inArp ? 'both' : inArp ? 'arp' : 'icmp',
-      responded:   icmp?.responded ?? false,
+      scan_type:   icmp?.responded && mac ? 'both' : mac ? 'arp' : 'icmp',
+      responded:   !!icmp?.responded,
       latency_ms:  icmp?.latency_ms ?? null,
       scanned_at,
     })
   }
 
-  // Write to Supabase (keep 30-day history)
-  const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
-  await supabase.from('scan_results').delete().lt('scanned_at', cutoff)
-  if (rows.length) await supabase.from('scan_results').insert(rows)
+  await supabase.from('scan_results').delete().neq('ip', '')
+  if (rows.length) {
+    const { error } = await supabase.from('scan_results').insert(rows)
+    if (error) console.log(`  [scan] write failed: ${error.message}`)
+  }
 
-  console.log(`  [scan] found ${rows.length} hosts across ${subnets.length} subnet(s)`)
+  const icmpCount = rows.filter(r => r.responded).length
+  console.log(`  [scan] ${rows.length} live hosts (ICMP ${icmpCount}, ARP-only ${rows.length - icmpCount}) in ${((Date.now() - started) / 1000).toFixed(1)}s`)
 }
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
@@ -283,10 +312,11 @@ async function runPoll() {
   await Promise.all([monitorDevices(), pollSnmp()])
 }
 
-async function runScan() {
-  const ts = new Date().toISOString()
-  console.log(`\n[${ts}] Running network scan`)
-  await scanNetwork()
+// Next scan starts SCAN_MS after the previous one finishes, so sweeps never overlap.
+async function runScanLoop() {
+  console.log(`\n[${new Date().toISOString()}] Running network scan`)
+  try { await scanNetwork() } catch (e) { console.log(`  [scan] failed: ${e.message}`) }
+  setTimeout(runScanLoop, SCAN_MS)
 }
 
 console.log('NetWatch Local Agent')
@@ -297,6 +327,5 @@ console.log('  Press Ctrl+C to stop.\n')
 
 // Run immediately, then on schedule
 runPoll()
-runScan()
+runScanLoop()
 setInterval(runPoll, POLL_MS)
-setInterval(runScan, SCAN_MS)

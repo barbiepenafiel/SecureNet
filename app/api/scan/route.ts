@@ -17,29 +17,33 @@ function adminClient() {
 export async function GET() {
   try {
     const sb = adminClient()
+
+    // The agent replaces the table each sweep with hosts verified live by ICMP or fresh ARP.
     const { data, error } = await sb
       .from('scan_results')
       .select('*')
-      .order('responded', { ascending: false })
-      .order('latency_ms', { ascending: true, nullsFirst: false })
-      .limit(500)
+      .order('scanned_at', { ascending: false })
+      .limit(1000)
 
     if (error) throw error
 
-    return NextResponse.json({
-      results:    data ?? [],
-      scanned_at: data?.[0]?.scanned_at ?? null,
+    // Deduplicate by IP, keeping the most recent entry
+    const seen = new Set<string>()
+    const unique = (data ?? []).filter(r => {
+      if (seen.has(r.ip)) return false
+      seen.add(r.ip)
+      return true
     })
+
+    const scanned_at = unique[0]?.scanned_at ?? null
+
+    return NextResponse.json({ results: unique, scanned_at })
   } catch {
     return NextResponse.json({ results: [], scanned_at: null })
   }
 }
 
-// POST is intentionally disabled — scanning must run on the campus machine
-// via `node poller/agent.js`, not on Vercel's servers.
+// POST: just return current scan data — the agent handles actual scanning.
 export async function POST() {
-  return NextResponse.json(
-    { error: 'Scanning runs on the local agent (node poller/agent.js), not on Vercel.' },
-    { status: 503 },
-  )
+  return GET()
 }

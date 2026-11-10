@@ -772,11 +772,11 @@ export default function TopologyHub({ devs, clientCounts = {} }: {
                 <div style={{ fontWeight: 600, marginBottom: 6 }}>No scan results yet</div>
                 <div style={{ fontSize: 12, marginBottom: 16 }}>Run a discovery scan to see live topology</div>
                 <div style={{ display: 'flex', gap: 8, justifyContent: 'center', alignItems: 'center', flexWrap: 'wrap' }}>
-                  <input className="form-input" style={{ width: 130, fontSize: 12 }}
+                  <input suppressHydrationWarning className="form-input" style={{ width: 130, fontSize: 12 }}
                     value={scanSubnet}
                     onChange={e => { setScanSubnet(e.target.value); localStorage.setItem('nms_scan_subnet', e.target.value) }}
                     placeholder="192.168.1"/>
-                  <button className="btn btn-sm btn-primary" onClick={() => fetchScan()}>Scan Now</button>
+                  <button suppressHydrationWarning className="btn btn-sm btn-primary" onClick={() => fetchScan()}>Scan Now</button>
                 </div>
               </div>
             )
@@ -792,11 +792,11 @@ export default function TopologyHub({ devs, clientCounts = {} }: {
                     {scanDevs.length} devices discovered · {scanDevs.filter(d => d.status === 'up').length} online
                   </span>
                   <span style={{ flex: 1 }}/>
-                  <input className="form-input" style={{ width: 120, fontSize: 11 }}
+                  <input suppressHydrationWarning className="form-input" style={{ width: 120, fontSize: 11 }}
                     value={scanSubnet}
                     onChange={e => { setScanSubnet(e.target.value); localStorage.setItem('nms_scan_subnet', e.target.value) }}
                     placeholder="192.168.1"/>
-                  <button className="btn btn-sm" onClick={() => { setScanDevs(null); fetchScan(scanSubnet) }} disabled={scanLoading}>
+                  <button suppressHydrationWarning className="btn btn-sm" onClick={() => { setScanDevs(null); fetchScan(scanSubnet) }} disabled={scanLoading}>
                     {scanLoading ? 'Scanning…' : '↺ Rescan'}
                   </button>
                 </div>
@@ -848,20 +848,20 @@ function FilterBar({ viewMode, setViewMode, bldgFilter, setBldgFilter, statusFil
     <div style={FB}>
       <div style={FI}>
         <div style={FL}><span>⊞</span> VIEW MODE</div>
-        <select style={FS} value={viewMode} onChange={e => setViewMode(e.target.value as ViewMode)}>
+        <select suppressHydrationWarning style={FS} value={viewMode} onChange={e => setViewMode(e.target.value as ViewMode)}>
           {viewOptions.map(o => <option key={o.value} value={o.value}>{o.icon} {o.label}</option>)}
         </select>
       </div>
       <div style={FI}>
         <div style={FL}><span>🏗</span> BUILDING ZONE</div>
-        <select style={FS} value={bldgFilter} onChange={e => setBldgFilter(e.target.value)}>
+        <select suppressHydrationWarning style={FS} value={bldgFilter} onChange={e => setBldgFilter(e.target.value)}>
           <option value="all">All Buildings ({bldgGroups.reduce((s,g)=>s+g.total,0)})</option>
           {bldgGroups.map(g => <option key={g.name} value={g.name}>{g.name} ({g.total})</option>)}
         </select>
       </div>
       <div style={FI}>
         <div style={FL}><span>📶</span> OPERATIONAL STATUS</div>
-        <select style={FS} value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
+        <select suppressHydrationWarning style={FS} value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
           <option value="all">All Statuses ({devs.length})</option>
           <option value="up">Online ({devs.filter(d=>d.status==='up').length})</option>
           <option value="warn">Warning ({devs.filter(d=>d.status==='warn').length})</option>
@@ -870,7 +870,7 @@ function FilterBar({ viewMode, setViewMode, bldgFilter, setBldgFilter, statusFil
       </div>
       <div style={{ ...FI, borderRight: 'none' }}>
         <div style={FL}><span>⚙</span> DEVICE TYPE</div>
-        <select style={FS} value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
+        <select suppressHydrationWarning style={FS} value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
           <option value="all">All Devices ({devs.length})</option>
           {deviceTypes.map(t => <option key={t} value={t}>{t} ({devs.filter(d=>d.type===t).length})</option>)}
         </select>

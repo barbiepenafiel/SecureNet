@@ -46,14 +46,14 @@ function AddDeviceModal({ onClose }: { onClose: () => void }) {
       <div className="form-row">
         <div className="form-group">
           <label className="form-label">Type</label>
-          <select className="form-select" value={form.type} onChange={set('type')}>
+          <select suppressHydrationWarning className="form-select" value={form.type} onChange={set('type')}>
             <option>Router</option><option>Switch</option><option>Access Point</option>
             <option>Server</option><option>Firewall</option>
           </select>
         </div>
         <div className="form-group">
           <label className="form-label">Building</label>
-          <select className="form-select" value={form.location} onChange={set('location')}>
+          <select suppressHydrationWarning className="form-select" value={form.location} onChange={set('location')}>
             <option>Building A</option><option>Building B</option>
             <option>Building C</option><option>Data Center</option>
           </select>
@@ -117,7 +117,7 @@ function MaintenanceModal({ onClose }: { onClose: () => void }) {
       </div>
       <div className="form-group">
         <label className="form-label">Recurrence</label>
-        <select className="form-select" value={form.recurrence} onChange={set('recurrence')}>
+        <select suppressHydrationWarning className="form-select" value={form.recurrence} onChange={set('recurrence')}>
           <option>Once</option><option>Weekly</option><option>Monthly</option>
         </select>
       </div>

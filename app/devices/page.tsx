@@ -104,7 +104,7 @@ function EditDeviceModal({ device, onClose, onSaved }: {
         </div>
         <div className="form-group">
           <label className="form-label">Type</label>
-          <select className="form-select" value={form.type} onChange={set('type')}>
+          <select suppressHydrationWarning className="form-select" value={form.type} onChange={set('type')}>
             {['Firewall','Router','Switch','Access Point','Server'].map(t => <option key={t}>{t}</option>)}
           </select>
         </div>
@@ -112,11 +112,11 @@ function EditDeviceModal({ device, onClose, onSaved }: {
       <div className="form-row">
         <div className="form-group">
           <label className="form-label">IP Address</label>
-          <input className="form-input mono" value={form.ip} onChange={set('ip')} />
+          <input suppressHydrationWarning className="form-input mono" value={form.ip} onChange={set('ip')} />
         </div>
         <div className="form-group">
           <label className="form-label">Location</label>
-          <select className="form-select" value={form.location} onChange={set('location')}>
+          <select suppressHydrationWarning className="form-select" value={form.location} onChange={set('location')}>
             {['Building A','Building B','Building C','Data Center','Library','Admin Building'].map(l => (
               <option key={l}>{l}</option>
             ))}
@@ -125,7 +125,7 @@ function EditDeviceModal({ device, onClose, onSaved }: {
       </div>
       <div className="form-group">
         <label className="form-label">Status</label>
-        <select className="form-select" value={form.status} onChange={set('status')}>
+        <select suppressHydrationWarning className="form-select" value={form.status} onChange={set('status')}>
           <option value="up">Up</option>
           <option value="warn">Warning</option>
           <option value="down">Down</option>
@@ -181,11 +181,11 @@ function AddDiscoveredModal({ scan, onClose, onSaved }: {
       <div className="form-row">
         <div className="form-group">
           <label className="form-label">Device Name *</label>
-          <input className="form-input" value={form.name} onChange={set('name')} placeholder="e.g. AP-B-03" />
+          <input suppressHydrationWarning className="form-input" value={form.name} onChange={set('name')} placeholder="e.g. AP-B-03" />
         </div>
         <div className="form-group">
           <label className="form-label">Type</label>
-          <select className="form-select" value={form.type} onChange={set('type')}>
+          <select suppressHydrationWarning className="form-select" value={form.type} onChange={set('type')}>
             {['Firewall','Router','Switch','Access Point','Server'].map(t => <option key={t}>{t}</option>)}
           </select>
         </div>
@@ -193,11 +193,11 @@ function AddDiscoveredModal({ scan, onClose, onSaved }: {
       <div className="form-row">
         <div className="form-group">
           <label className="form-label">IP Address</label>
-          <input className="form-input mono" value={form.ip} onChange={set('ip')} />
+          <input suppressHydrationWarning className="form-input mono" value={form.ip} onChange={set('ip')} />
         </div>
         <div className="form-group">
           <label className="form-label">Location</label>
-          <select className="form-select" value={form.location} onChange={set('location')}>
+          <select suppressHydrationWarning className="form-select" value={form.location} onChange={set('location')}>
             {['Building A','Building B','Building C','Data Center','Library','Admin Building'].map(l => (
               <option key={l}>{l}</option>
             ))}
@@ -352,7 +352,7 @@ export default function DevicesPage() {
           <option value="maint">Maintenance</option>
           <option value="attention">⚠ Needs Attention</option>
         </select>
-        <select className="form-select" style={{ width: 150 }} value={sourceF}
+        <select suppressHydrationWarning className="form-select" style={{ width: 150 }} value={sourceF}
           onChange={e => setSourceF(e.target.value as SourceFilter)}>
           <option value="all">All sources</option>
           <option value="managed">Managed only</option>
@@ -363,11 +363,11 @@ export default function DevicesPage() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' }}>
           {scanning && <span style={{ fontSize: 12, color: 'var(--info)' }}>⏳ Scanning…</span>}
           {scanError && <span style={{ fontSize: 12, color: 'var(--crit)' }}>{scanError}</span>}
-          <input className="form-input" style={{ width: 110, fontSize: 12 }}
+          <input suppressHydrationWarning className="form-input" style={{ width: 110, fontSize: 12 }}
             value={scanSubnet}
             onChange={e => { setScanSubnet(e.target.value); localStorage.setItem('nms_scan_subnet', e.target.value) }}
             placeholder="192.168.1" disabled={scanning} />
-          <button className="btn btn-sm btn-primary" onClick={() => doScan(scanSubnet)} disabled={scanning}>
+          <button suppressHydrationWarning className="btn btn-sm btn-primary" onClick={() => doScan(scanSubnet)} disabled={scanning}>
             {scanning ? 'Scanning…' : 'Scan'}
           </button>
           <CheckNowButton onDone={load} />

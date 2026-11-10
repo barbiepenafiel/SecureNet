@@ -163,22 +163,6 @@ export async function POST() {
     return { source: 'discovered', ip: r.ip, up: false, streak }
   }))
 
-  // Persist discovered device ping results so pages can show live Online/Offline status
-  if (discoveredResults.length > 0) {
-    db.from('scan_results').insert(
-      discoveredResults.map(r => ({
-        ip:         r.ip,
-        responded:  r.up,
-        scanned_at: now,
-        scan_type:  (discoveredMap.get(r.ip) as { device_type?: string } | undefined)
-                      ? 'icmp' : 'icmp',
-        latency_ms: null,
-        vendor:     null,
-        device_type: null,
-      }))
-    ).then(() => null).catch(() => null)
-  }
-
   return Response.json({
     checked:    (devices?.length ?? 0) + discoveredMap.size,
     managed:    managedResults,

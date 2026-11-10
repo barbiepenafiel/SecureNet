@@ -39,12 +39,12 @@ function AddUserModal({ onClose }: { onClose: () => void }) {
       </div>
       <div className="form-row">
         <div className="form-group"><label className="form-label">Role</label>
-          <select className="form-select" value={form.role} onChange={set('role')}>
+          <select suppressHydrationWarning className="form-select" value={form.role} onChange={set('role')}>
             <option>Admin</option><option>Viewer</option><option>Technician</option>
           </select>
         </div>
         <div className="form-group"><label className="form-label">Building Access</label>
-          <select className="form-select" value={form.location} onChange={set('location')}>
+          <select suppressHydrationWarning className="form-select" value={form.location} onChange={set('location')}>
             <option>All sites</option><option>Building A</option><option>Building B</option><option>Building C</option>
           </select>
         </div>

@@ -97,6 +97,7 @@ export default function AIInsightsButton() {
         }}
         onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1.08)' }}
         onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1)' }}
+        suppressHydrationWarning
       >
         🤖
       </button>
