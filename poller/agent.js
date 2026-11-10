@@ -71,38 +71,29 @@ async function getArpTable() {
 }
 
 async function detectSubnets() {
-  const subnets = []
-  const VIRTUAL = ['virtualbox','vmware','vmnet','hyper-v','wsl','loopback','bluetooth',
-                   'teredo','isatap','tunnel','pseudo','tap','miniport','virtual']
-  const SKIP_PREFIXES = ['127.','169.254.','192.168.56.','192.168.99.']
+  // Use the default gateway's subnet — the network this PC uses to reach the internet.
+  // This is always the correct campus network, even on multi-homed machines.
   try {
-    const cmd = isWindows ? 'ipconfig' : 'ip addr show'
-    const { stdout } = await execAsync(cmd, { timeout: 5000 })
     if (isWindows) {
-      let adapterName = ''
-      for (const rawLine of stdout.split(/\r?\n/)) {
-        const line = rawLine.trimEnd()
-        if (/^\S.*:\s*$/.test(line)) { adapterName = line.toLowerCase(); continue }
-        if (VIRTUAL.some(k => adapterName.includes(k))) continue
-        const m = line.match(/IPv4 Address[.\s]+:\s*([\d.]+)/i)
-        if (!m) continue
-        const ip = m[1].trim()
-        if (SKIP_PREFIXES.some(p => ip.startsWith(p))) continue
-        const sub = ip.split('.').slice(0, 3).join('.')
-        if (!subnets.includes(sub)) subnets.push(sub)
+      // "route print 0.0.0.0" lists the default route; grab the gateway IP
+      const { stdout: routeOut } = await execAsync('route print 0.0.0.0', { timeout: 5000 })
+      const gwMatch = routeOut.match(/0\.0\.0\.0\s+0\.0\.0\.0\s+([\d.]+)/m)
+      if (gwMatch) {
+        const sub = gwMatch[1].split('.').slice(0, 3).join('.')
+        return [sub]
       }
+      // Fallback: parse ipconfig for the gateway line
+      const { stdout: cfgOut } = await execAsync('ipconfig', { timeout: 5000 })
+      const gwLine = cfgOut.match(/Default Gateway[.\s]+:\s*([\d.]+)/i)
+      if (gwLine) return [gwLine[1].split('.').slice(0, 3).join('.')]
     } else {
-      for (const line of stdout.split('\n')) {
-        const m = line.match(/inet ([\d.]+)\/(\d+)/)
-        if (!m) continue
-        const ip = m[1]
-        if (SKIP_PREFIXES.some(p => ip.startsWith(p))) continue
-        const sub = ip.split('.').slice(0, 3).join('.')
-        if (!subnets.includes(sub)) subnets.push(sub)
-      }
+      // Linux: "ip route show default" → "default via GATEWAY_IP dev IFACE"
+      const { stdout } = await execAsync('ip route show default', { timeout: 5000 })
+      const m = stdout.match(/default via ([\d.]+)/)
+      if (m) return [m[1].split('.').slice(0, 3).join('.')]
     }
   } catch {}
-  return subnets
+  return []
 }
 
 // ── SNMP ──────────────────────────────────────────────────────────────────────

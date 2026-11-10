@@ -24,31 +24,11 @@ export default function DiscoveredKpi() {
 
   async function load() {
     try {
-      // Use /api/scan GET — already picks the freshest source (Supabase or in-memory cache)
       const res = await fetch('/api/scan')
       const d = await res.json()
-      const rows: Row[] = d.results ?? []
-
-      if (rows.length) { apply(rows); return }
-
-      // No results — auto-trigger a scan using a physical subnet
-      const detectedSubnets: string[] = d.detected_subnets ?? (d.detected_subnet ? [d.detected_subnet] : [])
-      const savedSubnet = localStorage.getItem('nms_scan_subnet')
-      const savedIsPhysical = savedSubnet && detectedSubnets.includes(savedSubnet)
-      const subnet = (!savedIsPhysical && detectedSubnets[0]) ? detectedSubnets[0] : (savedSubnet ?? '192.168.1')
-      if (!savedIsPhysical && detectedSubnets[0]) localStorage.setItem('nms_scan_subnet', detectedSubnets[0])
-      setScanning(true)
-      const scanRes = await fetch('/api/scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subnet }),
-      })
-      const scanData = await scanRes.json()
-      apply(scanData.results ?? [])
+      apply(d.results ?? [])
     } catch {
       setTotal(0)
-    } finally {
-      setScanning(false)
     }
   }
 
