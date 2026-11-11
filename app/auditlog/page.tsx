@@ -1,5 +1,8 @@
 import { createServerClient } from '@/lib/supabase'
 import type { AuditEntry } from '@/lib/database.types'
+import LiveRefresh from '@/components/LiveRefresh'
+
+const LIVE_TABLES = ['audit_log']
 
 export const dynamic = 'force-dynamic'
 
@@ -10,9 +13,10 @@ export default async function AuditLogPage() {
 
   return (
     <>
+      <LiveRefresh tables={LIVE_TABLES} />
       <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
-        <input className="form-input" style={{ width: 220 }} placeholder="Search log…" />
-        <select className="form-select" style={{ width: 160 }}>
+        <input suppressHydrationWarning className="form-input" style={{ width: 220 }} placeholder="Search log…" />
+        <select suppressHydrationWarning className="form-select" style={{ width: 160 }}>
           <option>All actions</option>
           <option>Config changes</option>
           <option>Alert actions</option>

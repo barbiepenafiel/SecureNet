@@ -4,8 +4,12 @@ import { useState, useEffect } from 'react'
 import { supabase } from '@/lib/supabase'
 import Modal from '@/components/Modal'
 import type { AlertConfig } from '@/lib/database.types'
+import { useAuth } from '@/components/AuthProvider'
+import ManageSection from '@/components/ManageSection'
+import { ROLE_LABEL, type Profile, type Role } from '@/lib/roles'
 
-type SettingsTab = 'notif' | 'roles' | 'maint' | 'disc' | 'integrations'
+type SettingsTab = 'notif' | 'roles' | 'manage' | 'maint' | 'disc' | 'integrations'
+const SETTINGS_TABS: SettingsTab[] = ['notif', 'roles', 'manage', 'maint', 'disc', 'integrations']
 
 import type { SmtpStatus } from '@/lib/database.types'
 
@@ -14,7 +18,7 @@ function Toggle({ label, sub, defaultChecked }: { label: string; sub: string; de
   return (
     <div className="toggle-wrap">
       <label className="toggle">
-        <input type="checkbox" checked={on} onChange={e => setOn(e.target.checked)} />
+        <input suppressHydrationWarning type="checkbox" checked={on} onChange={e => setOn(e.target.checked)} />
         <span className="toggle-slider" />
       </label>
       <div>
@@ -25,35 +29,147 @@ function Toggle({ label, sub, defaultChecked }: { label: string; sub: string; de
   )
 }
 
-function AddUserModal({ onClose }: { onClose: () => void }) {
-  const [form, setForm] = useState({ name: '', email: '', role: 'Admin', location: 'All sites', mfa: true })
+const BUILDINGS = ['All sites', 'Building A', 'Building B', 'Building C']
+
+function AddUserModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
+  const [form, setForm] = useState({ full_name: '', email: '', password: '', role: 'it_staff' as Role, building_access: 'All sites' })
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setForm(f => ({ ...f, [k]: e.target.value }))
+
+  async function save() {
+    setSaving(true); setError(null)
+    const res = await fetch('/api/users', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(form),
+    })
+    const d = await res.json().catch(() => ({}))
+    setSaving(false)
+    if (!res.ok) { setError(d.error ?? 'Failed to add user'); return }
+    onSaved(); onClose()
+  }
+
   return (
     <Modal title="Add User" onClose={onClose}
-      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn btn-primary" onClick={onClose}>Send Invite</button></>}
+      footer={<><button suppressHydrationWarning className="btn" onClick={onClose}>Cancel</button>
+        <button suppressHydrationWarning className="btn btn-primary" onClick={save} disabled={saving}>{saving ? 'Adding…' : 'Add User'}</button></>}
     >
       <div className="form-row">
-        <div className="form-group"><label className="form-label">Full Name</label><input className="form-input" value={form.name} onChange={set('name')} /></div>
-        <div className="form-group"><label className="form-label">Email</label><input className="form-input" type="email" value={form.email} onChange={set('email')} /></div>
+        <div className="form-group"><label className="form-label">Full Name</label><input suppressHydrationWarning className="form-input" value={form.full_name} onChange={set('full_name')} /></div>
+        <div className="form-group"><label className="form-label">Email</label><input suppressHydrationWarning className="form-input" type="email" value={form.email} onChange={set('email')} /></div>
       </div>
       <div className="form-row">
         <div className="form-group"><label className="form-label">Role</label>
           <select suppressHydrationWarning className="form-select" value={form.role} onChange={set('role')}>
-            <option>Admin</option><option>Viewer</option><option>Technician</option>
+            <option value="it_staff">{ROLE_LABEL.it_staff}</option>
+            <option value="net_admin">{ROLE_LABEL.net_admin}</option>
           </select>
         </div>
         <div className="form-group"><label className="form-label">Building Access</label>
-          <select suppressHydrationWarning className="form-select" value={form.location} onChange={set('location')}>
-            <option>All sites</option><option>Building A</option><option>Building B</option><option>Building C</option>
+          <select suppressHydrationWarning className="form-select" value={form.building_access} onChange={set('building_access')}>
+            {BUILDINGS.map(b => <option key={b}>{b}</option>)}
           </select>
         </div>
       </div>
-      <div className="toggle-wrap">
-        <label className="toggle"><input type="checkbox" defaultChecked /><span className="toggle-slider" /></label>
-        <span>Require MFA</span>
+      <div className="form-group">
+        <label className="form-label">Temporary Password (min. 8 characters)</label>
+        <input suppressHydrationWarning className="form-input" type="text" autoComplete="off" value={form.password} onChange={set('password')} />
+        <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 4 }}>Give this to the user so they can sign in.</div>
       </div>
+      <div style={{ fontSize: 12, color: 'var(--text2)', background: 'var(--surface2)', padding: 10, borderRadius: 6 }}>
+        <strong>{ROLE_LABEL.net_admin}:</strong> full access, including settings, users, devices and config backups.<br />
+        <strong>{ROLE_LABEL.it_staff}:</strong> can view all monitoring pages and acknowledge or resolve alerts. Cannot change devices, settings or users.
+      </div>
+      {error && <div style={{ color: 'var(--crit)', fontSize: 13, marginTop: 10 }}>{error}</div>}
     </Modal>
+  )
+}
+
+function timeAgo(iso: string | null) {
+  if (!iso) return 'Never'
+  const s = (Date.now() - new Date(iso).getTime()) / 1000
+  if (s < 60) return 'Just now'
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
+  return `${Math.floor(s / 86400)}d ago`
+}
+
+function UsersPanel() {
+  const { profile: me } = useAuth()
+  const [users, setUsers] = useState<Profile[]>([])
+  const [loading, setLoading] = useState(true)
+  const [adding, setAdding] = useState(false)
+  const [msg, setMsg] = useState<string | null>(null)
+
+  async function load() {
+    const res = await fetch('/api/users')
+    const d = await res.json().catch(() => ({}))
+    if (res.ok) setUsers(d.users ?? [])
+    else setMsg(d.error ?? 'Could not load users — run supabase/roles.sql first.')
+    setLoading(false)
+  }
+  useEffect(() => { load() }, [])
+
+  async function update(id: string, patch: Partial<Profile>) {
+    const res = await fetch('/api/users', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, ...patch }),
+    })
+    const d = await res.json().catch(() => ({}))
+    if (!res.ok) setMsg(d.error ?? 'Update failed')
+    load()
+  }
+
+  async function remove(u: Profile) {
+    if (!confirm(`Remove ${u.full_name || u.email}? They will no longer be able to sign in.`)) return
+    const res = await fetch(`/api/users?id=${u.id}`, { method: 'DELETE' })
+    const d = await res.json().catch(() => ({}))
+    if (!res.ok) setMsg(d.error ?? 'Delete failed')
+    load()
+  }
+
+  return (
+    <div className="card">
+      <div className="card-header">
+        User Roles
+        <div className="card-header-actions">
+          <button className="btn btn-primary btn-sm" onClick={() => setAdding(true)} suppressHydrationWarning>+ Add User</button>
+        </div>
+      </div>
+      {msg && <div style={{ padding: '10px 16px', color: 'var(--crit)', fontSize: 13 }}>{msg}</div>}
+      <div style={{ overflowX: 'auto' }}>
+        <table className="tbl">
+          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Building Access</th><th>Last Login</th><th></th></tr></thead>
+          <tbody>
+            {loading && <tr><td colSpan={6} style={{ color: 'var(--text3)' }}>Loading…</td></tr>}
+            {!loading && users.map(u => {
+              const isMe = u.id === me?.id
+              return (
+                <tr key={u.id}>
+                  <td><strong>{u.full_name || '—'}</strong>{isMe && <span style={{ fontSize: 11, color: 'var(--text3)' }}> (you)</span>}</td>
+                  <td style={{ fontSize: 12 }}>{u.email}</td>
+                  <td>
+                    <select suppressHydrationWarning className="form-select" style={{ width: 'auto', padding: '3px 6px', fontSize: 12 }}
+                      value={u.role} disabled={isMe} onChange={e => update(u.id, { role: e.target.value as Role })}>
+                      <option value="net_admin">{ROLE_LABEL.net_admin}</option>
+                      <option value="it_staff">{ROLE_LABEL.it_staff}</option>
+                    </select>
+                  </td>
+                  <td>
+                    <select suppressHydrationWarning className="form-select" style={{ width: 'auto', padding: '3px 6px', fontSize: 12 }}
+                      value={u.building_access} onChange={e => update(u.id, { building_access: e.target.value })}>
+                      {BUILDINGS.map(b => <option key={b}>{b}</option>)}
+                    </select>
+                  </td>
+                  <td style={{ fontSize: 12, color: 'var(--text3)' }}>{timeAgo(u.last_login)}</td>
+                  <td>{!isMe && <button className="btn btn-sm" style={{ color: 'var(--crit)' }} onClick={() => remove(u)} suppressHydrationWarning>Remove</button>}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+      {adding && <AddUserModal onClose={() => setAdding(false)} onSaved={load} />}
+    </div>
   )
 }
 
@@ -66,7 +182,13 @@ const DEFAULT_CFG: Omit<AlertConfig, 'id' | 'updated_at' | 'updated_by'> = {
 
 export default function SettingsPage() {
   const [tab,         setTab]      = useState<SettingsTab>('notif')
-  const [showAddUser, setAddUser]  = useState(false)
+  // Open a tab from the link, e.g. /settings?tab=manage
+  useEffect(() => {
+    const t = new URLSearchParams(window.location.search).get('tab') as SettingsTab | null
+    if (t && SETTINGS_TABS.includes(t)) setTab(t)
+  }, [])
+  const { profile } = useAuth()
+  const myName = profile?.full_name || profile?.email || 'Unknown'
   const [cfg,         setCfg]      = useState(DEFAULT_CFG)
   const [cfgSaving,   setCfgSaving] = useState(false)
   const [cfgMsg,      setCfgMsg]   = useState<string | null>(null)
@@ -93,10 +215,10 @@ export default function SettingsPage() {
     const res = await fetch('/api/alert-config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...cfg, updated_by: 'Barbie Admin' }),
+      body: JSON.stringify({ ...cfg, updated_by: myName }),
     })
     await supabase.from('audit_log').insert({
-      user_name: 'Barbie Admin', user_ip: '192.168.1.5',
+      user_name: myName, user_ip: 'browser',
       action: 'Threshold Changed', object_name: 'Alert thresholds',
       before_val: 'old', after_val: JSON.stringify(cfg),
     })
@@ -108,12 +230,15 @@ export default function SettingsPage() {
   return (
     <>
       <div className="tabs" id="settings-tabs">
-        {(['notif','roles','maint','disc','integrations'] as SettingsTab[]).map(t => (
+        {(['notif','roles','manage','maint','disc','integrations'] as SettingsTab[]).map(t => (
           <div key={t} className={`tab${tab === t ? ' active' : ''}`} onClick={() => setTab(t)}>
-            {{ notif:'Notifications', roles:'Roles & Access', maint:'Maintenance', disc:'Discovery', integrations:'Integrations' }[t]}
+            {{ notif:'Notifications', roles:'Roles & Access', manage:'Manage', maint:'Maintenance', disc:'Discovery', integrations:'Integrations' }[t]}
           </div>
         ))}
       </div>
+
+      {/* ── Manage: device details + floor plan rooms ── */}
+      {tab === 'manage' && <ManageSection />}
 
       {/* ── Notifications ── */}
       {tab === 'notif' && (
@@ -144,7 +269,7 @@ SMTP_TO=alerts-recipient@email.com`}
                 </div>
               )}
               <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
-                <button
+                <button suppressHydrationWarning
                   className="btn btn-sm btn-primary"
                   disabled={!smtp?.configured || testingEmail}
                   onClick={async () => {
@@ -175,26 +300,26 @@ SMTP_TO=alerts-recipient@email.com`}
             <div className="card-header">Alert Thresholds</div>
             <div className="card-body">
               <div className="form-row">
-                <div className="form-group"><label className="form-label">CPU Warning (%)</label><input className="form-input" type="number" value={cfg.cpu_warn_pct} onChange={setN('cpu_warn_pct')} /></div>
-                <div className="form-group"><label className="form-label">CPU Critical (%)</label><input className="form-input" type="number" value={cfg.cpu_crit_pct} onChange={setN('cpu_crit_pct')} /></div>
+                <div className="form-group"><label className="form-label">CPU Warning (%)</label><input suppressHydrationWarning className="form-input" type="number" value={cfg.cpu_warn_pct} onChange={setN('cpu_warn_pct')} /></div>
+                <div className="form-group"><label className="form-label">CPU Critical (%)</label><input suppressHydrationWarning className="form-input" type="number" value={cfg.cpu_crit_pct} onChange={setN('cpu_crit_pct')} /></div>
               </div>
               <div className="form-row">
-                <div className="form-group"><label className="form-label">Memory Warning (%)</label><input className="form-input" type="number" value={cfg.mem_warn_pct} onChange={setN('mem_warn_pct')} /></div>
-                <div className="form-group"><label className="form-label">Memory Critical (%)</label><input className="form-input" type="number" value={cfg.mem_crit_pct} onChange={setN('mem_crit_pct')} /></div>
+                <div className="form-group"><label className="form-label">Memory Warning (%)</label><input suppressHydrationWarning className="form-input" type="number" value={cfg.mem_warn_pct} onChange={setN('mem_warn_pct')} /></div>
+                <div className="form-group"><label className="form-label">Memory Critical (%)</label><input suppressHydrationWarning className="form-input" type="number" value={cfg.mem_crit_pct} onChange={setN('mem_crit_pct')} /></div>
               </div>
               <div className="form-row">
-                <div className="form-group"><label className="form-label">Latency Warning (ms)</label><input className="form-input" type="number" value={cfg.latency_warn_ms} onChange={setN('latency_warn_ms')} /></div>
-                <div className="form-group"><label className="form-label">Latency Critical (ms)</label><input className="form-input" type="number" value={cfg.latency_crit_ms} onChange={setN('latency_crit_ms')} /></div>
+                <div className="form-group"><label className="form-label">Latency Warning (ms)</label><input suppressHydrationWarning className="form-input" type="number" value={cfg.latency_warn_ms} onChange={setN('latency_warn_ms')} /></div>
+                <div className="form-group"><label className="form-label">Latency Critical (ms)</label><input suppressHydrationWarning className="form-input" type="number" value={cfg.latency_crit_ms} onChange={setN('latency_crit_ms')} /></div>
               </div>
               <div className="form-row">
-                <div className="form-group"><label className="form-label">Flap Threshold (flips / 5 min)</label><input className="form-input" type="number" value={cfg.flap_threshold} onChange={setN('flap_threshold')} /></div>
-                <div className="form-group"><label className="form-label">Grace Period (min before alert)</label><input className="form-input" type="number" value={cfg.grace_period_min} onChange={setN('grace_period_min')} /></div>
+                <div className="form-group"><label className="form-label">Flap Threshold (flips / 5 min)</label><input suppressHydrationWarning className="form-input" type="number" value={cfg.flap_threshold} onChange={setN('flap_threshold')} /></div>
+                <div className="form-group"><label className="form-label">Grace Period (min before alert)</label><input suppressHydrationWarning className="form-input" type="number" value={cfg.grace_period_min} onChange={setN('grace_period_min')} /></div>
               </div>
               <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 10 }}>
                 Grace period prevents alerts for temporary flaps. Flap threshold ignores rapid state changes.
               </div>
               {cfgMsg && <div style={{ marginBottom: 10, fontSize: 13, color: cfgMsg.startsWith('✓') ? 'var(--ok)' : 'var(--crit)' }}>{cfgMsg}</div>}
-              <button className="btn btn-primary" onClick={saveThresholds} disabled={cfgSaving}>
+              <button suppressHydrationWarning className="btn btn-primary" onClick={saveThresholds} disabled={cfgSaving}>
                 {cfgSaving ? 'Saving…' : 'Save Thresholds'}
               </button>
             </div>
@@ -203,26 +328,7 @@ SMTP_TO=alerts-recipient@email.com`}
       )}
 
       {/* ── Roles ── */}
-      {tab === 'roles' && (
-        <div className="card">
-          <div className="card-header">
-            User Roles
-            <div className="card-header-actions">
-              <button className="btn btn-primary btn-sm" onClick={() => setAddUser(true)}>+ Add User</button>
-            </div>
-          </div>
-          <div style={{ overflowX: 'auto' }}>
-            <table className="tbl">
-              <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Building Access</th><th>MFA</th><th>Last Login</th><th></th></tr></thead>
-              <tbody>
-                <tr><td><strong>Barbie Admin</strong></td><td style={{fontSize:12}}>penafiel.barbie@dnsc.edu.ph</td><td><span className="chip chip-info">Main Admin</span></td><td>All sites</td><td><span className="chip chip-ok">On</span></td><td style={{fontSize:12,color:'var(--text3)'}}>Just now</td><td><button className="btn btn-sm">Edit</button></td></tr>
-                <tr><td>Juan dela Cruz</td><td style={{fontSize:12}}>jdelacruz@dnsc.edu.ph</td><td><span className="chip chip-warn">Admin</span></td><td>Building A, C</td><td><span className="chip chip-ok">On</span></td><td style={{fontSize:12,color:'var(--text3)'}}>2h ago</td><td><button className="btn btn-sm">Edit</button></td></tr>
-                <tr><td>Maria Santos</td><td style={{fontSize:12}}>msantos@dnsc.edu.ph</td><td><span className="chip chip-off">Viewer</span></td><td>Building B</td><td><span className="chip chip-off">Off</span></td><td style={{fontSize:12,color:'var(--text3)'}}>1d ago</td><td><button className="btn btn-sm">Edit</button></td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+      {tab === 'roles' && <UsersPanel />}
 
       {/* ── Maintenance ── */}
       {tab === 'maint' && (
@@ -230,15 +336,15 @@ SMTP_TO=alerts-recipient@email.com`}
           <div className="card-header">
             Maintenance Windows
             <div className="card-header-actions">
-              <button className="btn btn-primary btn-sm" onClick={() => (window as unknown as Record<string,()=>void>).__openMaintenance?.()}>+ New Window</button>
+              <button suppressHydrationWarning className="btn btn-primary btn-sm" onClick={() => (window as unknown as Record<string,()=>void>).__openMaintenance?.()}>+ New Window</button>
             </div>
           </div>
           <div style={{ overflowX: 'auto' }}>
             <table className="tbl">
               <thead><tr><th>Name</th><th>Devices</th><th>Start</th><th>End</th><th>Recurrence</th><th>Status</th><th></th></tr></thead>
               <tbody>
-                <tr><td>Weekly Patch Night</td><td>All switches</td><td>Sat 23:00</td><td>Sun 03:00</td><td>Weekly</td><td><span className="chip chip-maint">Scheduled</span></td><td><button className="btn btn-sm">Edit</button></td></tr>
-                <tr><td>Bldg B UPS Replacement</td><td>SW-B2, AP-B-01</td><td>2026-11-06 08:00</td><td>2026-11-06 12:00</td><td>Once</td><td><span className="chip chip-warn">Upcoming</span></td><td><button className="btn btn-sm">Edit</button></td></tr>
+                <tr><td>Weekly Patch Night</td><td>All switches</td><td>Sat 23:00</td><td>Sun 03:00</td><td>Weekly</td><td><span className="chip chip-maint">Scheduled</span></td><td><button suppressHydrationWarning className="btn btn-sm">Edit</button></td></tr>
+                <tr><td>Bldg B UPS Replacement</td><td>SW-B2, AP-B-01</td><td>2026-11-06 08:00</td><td>2026-11-06 12:00</td><td>Once</td><td><span className="chip chip-warn">Upcoming</span></td><td><button suppressHydrationWarning className="btn btn-sm">Edit</button></td></tr>
               </tbody>
             </table>
           </div>
@@ -251,12 +357,12 @@ SMTP_TO=alerts-recipient@email.com`}
           <div className="card">
             <div className="card-header">Network Discovery</div>
             <div className="card-body">
-              <div className="form-group"><label className="form-label">Subnet Range</label><input className="form-input" defaultValue="192.168.0.0/16" /></div>
-              <div className="form-group"><label className="form-label">SNMP Community</label><input className="form-input" defaultValue="nw2026" type="password" /></div>
+              <div className="form-group"><label className="form-label">Subnet Range</label><input suppressHydrationWarning className="form-input" defaultValue="192.168.0.0/16" /></div>
+              <div className="form-group"><label className="form-label">SNMP Community</label><input suppressHydrationWarning className="form-input" defaultValue="nw2026" type="password" /></div>
               <div className="form-group"><label className="form-label">Polling Interval</label>
-                <select className="form-select"><option>1 second</option><option selected>30 seconds</option><option>1 minute</option><option>5 minutes</option></select>
+                <select suppressHydrationWarning className="form-select"><option>1 second</option><option selected>30 seconds</option><option>1 minute</option><option>5 minutes</option></select>
               </div>
-              <button className="btn btn-primary" onClick={() => alert('Discovery started on 192.168.0.0/16…')}>Start Discovery</button>
+              <button suppressHydrationWarning className="btn btn-primary" onClick={() => alert('Discovery started on 192.168.0.0/16…')}>Start Discovery</button>
             </div>
           </div>
           <div className="card">
@@ -285,8 +391,8 @@ SMTP_TO=alerts-recipient@email.com`}
                 <div style={{ fontSize: 20 }}>{item.icon}</div>
                 <div style={{ fontWeight: 600 }}>{item.label}</div>
                 <div style={{ fontSize: 12, color: 'var(--text3)' }}>{item.sub}</div>
-                <input className="form-input" placeholder={item.placeholder} />
-                <button className="btn btn-sm">Save</button>
+                <input suppressHydrationWarning className="form-input" placeholder={item.placeholder} />
+                <button suppressHydrationWarning className="btn btn-sm">Save</button>
               </div>
             </div>
           ))}
@@ -296,13 +402,12 @@ SMTP_TO=alerts-recipient@email.com`}
               <div style={{ fontWeight: 600 }}>JSON-RPC API</div>
               <div style={{ fontSize: 12, color: 'var(--text3)' }}>External access via API tokens</div>
               <code style={{ background: 'var(--surface2)', padding: '6px 8px', borderRadius: 'var(--r)', display: 'block', wordBreak: 'break-all', fontFamily: 'var(--mono)', fontSize: 11 }}>nw_tok_abc123def456</code>
-              <button className="btn btn-sm" onClick={() => alert('Token regenerated!')}>Regenerate</button>
+              <button suppressHydrationWarning className="btn btn-sm" onClick={() => alert('Token regenerated!')}>Regenerate</button>
             </div>
           </div>
         </div>
       )}
 
-      {showAddUser && <AddUserModal onClose={() => setAddUser(false)} />}
     </>
   )
 }

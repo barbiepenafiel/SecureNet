@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { supabase } from '@/lib/supabase'
 import type { Device, LifecycleRecord, ScanResult } from '@/lib/database.types'
+import { usePolling } from '@/lib/usePolling'
 
 const TODAY = new Date()
 
@@ -148,6 +149,8 @@ export default function LifecyclePage() {
       .subscribe()
     return () => { supabase.removeChannel(ch) }
   }, [load])
+  // Keep data current without a manual refresh
+  usePolling(load)
 
   if (loading) return (
     <div style={{ padding: 40, textAlign: 'center', color: 'var(--text3)' }}>

@@ -5,7 +5,7 @@ import type { ScanResult } from '@/lib/database.types'
 
 interface ScanStats { total: number; icmp: number; arp: number }
 
-const POLL_MS = 10_000 // refresh every 10 s to match agent scan cadence
+const POLL_MS = 5_000 // refresh every 5 s so new scan results show without a manual refresh
 
 export default function NetworkScanCard() {
   const [results,  setResults]  = useState<ScanResult[]>([])

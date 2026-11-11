@@ -4,6 +4,8 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabase'
+import { useAuth } from '@/components/AuthProvider'
+import { ROLE_LABEL, isAdminOnlyPath } from '@/lib/roles'
 
 const NAV_GROUPS = [
   {
@@ -19,7 +21,6 @@ const NAV_GROUPS = [
   {
     label: 'Insights',
     items: [
-      { href: '/clients', icon: '◉', label: 'Clients' },
       { href: '/traffic', icon: '≋', label: 'Traffic'  },
       { href: '/sla',     icon: '◎', label: 'SLA / Uptime' },
     ],
@@ -43,6 +44,13 @@ const NAV_GROUPS = [
 
 export default function Sidebar() {
   const path = usePathname()
+  const { profile, signOut } = useAuth()
+  const isAdmin = profile?.role === 'net_admin'
+  const navGroups = NAV_GROUPS
+    .map(g => ({ ...g, items: g.items.filter(i => isAdmin || !isAdminOnlyPath(i.href)) }))
+    .filter(g => g.items.length > 0)
+  const displayName = profile?.full_name || profile?.email || '…'
+  const initials = displayName.split(/[\s@.]+/).filter(Boolean).slice(0, 2).map(s => s[0]?.toUpperCase()).join('')
   const [alertBadge, setAlertBadge] = useState<number>(0)
   const [clock, setClock] = useState('')
 
@@ -62,6 +70,7 @@ export default function Sidebar() {
         .select('*', { count: 'exact', head: true })
         .eq('acked', false)
         .eq('suppressed', false)
+        .is('resolved_at', null)
       setAlertBadge(count ?? 0)
     }
     fetchCount()
@@ -71,7 +80,9 @@ export default function Sidebar() {
       .channel('alerts-count')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'alerts' }, fetchCount)
       .subscribe()
-    return () => { supabase.removeChannel(channel) }
+    // Backup refresh every 5 s in case realtime isn't enabled for alerts
+    const poll = setInterval(() => { if (document.visibilityState === 'visible') fetchCount() }, 5_000)
+    return () => { supabase.removeChannel(channel); clearInterval(poll) }
   }, [])
 
   function isActive(href: string) {
@@ -88,7 +99,7 @@ export default function Sidebar() {
       </div>
 
       <nav>
-        {NAV_GROUPS.map(group => (
+        {navGroups.map(group => (
           <div className="nav-section" key={group.label}>
             <div className="nav-label">{group.label}</div>
             {group.items.map(item => (
@@ -109,11 +120,15 @@ export default function Sidebar() {
       </nav>
 
       <div className="sidebar-footer">
-        <div className="avatar">BA</div>
-        <div className="sidebar-user">
-          <strong>Barbie Admin</strong>
-          <span>Main Admin</span>
+        <div className="avatar">{initials || '?'}</div>
+        <div className="sidebar-user" style={{ minWidth: 0, flex: 1 }}>
+          <strong style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayName}</strong>
+          <span>{profile ? ROLE_LABEL[profile.role] : ''}</span>
         </div>
+        <button onClick={signOut} title="Sign out" aria-label="Sign out" suppressHydrationWarning
+          style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,.5)', cursor: 'pointer', fontSize: 16, padding: 4 }}>
+          ⏻
+        </button>
       </div>
     </aside>
   )

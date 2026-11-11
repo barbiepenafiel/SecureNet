@@ -1,10 +1,12 @@
 'use client'
 
-import { useState, useMemo, useEffect, useCallback } from 'react'
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import Image from 'next/image'
+import { useRouter } from 'next/navigation'
 import type { Device, ScanResult } from '@/lib/database.types'
 import { supabase } from '@/lib/supabase'
 import TopologyCanvas from './TopologyCanvas'
+import { useFloorRooms, roomOfDevice, stripRoomLabels, FLOOR_VIEWBOX, type FloorRoom } from '@/lib/floor-rooms'
 
 type ViewMode = 'buildings' | 'tree' | 'floormap' | 'realtime'
 
@@ -33,118 +35,103 @@ function getBldgImage(name: string) {
   return '/images/unknown.png'
 }
 
-// ─── Floor plan style ─────────────────────────────────────────────────────────
+// ─── Floor plan rooms + overlay ───────────────────────────────────────────────
+// Rooms come from Settings → Manage (lib/floor-rooms.ts). Room names and the
+// device markers are drawn in the floor drawing's own coordinates, so they
+// stay in place at any size.
 
-type RoomDef = {
-  id: string
-  label: string
-  // bounding box in SVG coords (for dot/badge placement)
-  cx: number
-  cy: number
-  badgeX: number
-  badgeY: number
+const FP_STATUS: Record<string, { color: string; label: string }> = {
+  up:          { color: '#16a34a', label: 'Online' },
+  warn:        { color: '#d97706', label: 'Warning' },
+  unreachable: { color: '#f59e0b', label: 'Unreachable' },
+  down:        { color: '#dc2626', label: 'Offline' },
+  unknown:     { color: '#94a3b8', label: 'Unknown' },
+  maint:       { color: '#7c3aed', label: 'Maintenance' },
+}
+const fpSt = (s: string) => FP_STATUS[s] ?? FP_STATUS.unknown
+const isLive = (d: Device) => d.status === 'up' || d.status === 'warn'
+
+function roomHealth(devs: Device[]) {
+  const live = devs.filter(isLive).length
+  if (!devs.length) return '#94a3b8'
+  if (live === devs.length && !devs.some(d => d.status === 'warn')) return '#16a34a'
+  if (live === 0) return '#dc2626'
+  return '#d97706'
 }
 
-// 1st floor rooms in the SVG viewBox="0 0 920 520"
-const ROOMS_1ST: RoomDef[] = [
-  { id: 'faculty1',   label: 'Faculty 1',          cx: 187, cy: 120, badgeX: 60,  badgeY: 48 },
-  { id: 'accred',     label: 'Accreditation Room',  cx: 477, cy: 110, badgeX: 477, badgeY: 48 },
-  { id: 'netlab',     label: 'Netlab',              cx: 750, cy: 120, badgeX: 858, badgeY: 48 },
-  { id: 'faculty2',   label: 'Faculty 2',           cx: 165, cy: 370, badgeX: 60,  badgeY: 302 },
-  { id: 'comlab1',    label: 'Comlab 1',            cx: 595, cy: 370, badgeX: 595, badgeY: 302 },
-]
-
-// 2nd floor rooms in viewBox="0 0 1020 520"
-const ROOMS_2ND: RoomDef[] = [
-  { id: 'maclab',     label: 'MacLab',     cx: 195, cy: 120, badgeX: 60,  badgeY: 48 },
-  { id: 'aes',        label: 'AES',        cx: 475, cy: 120, badgeX: 475, badgeY: 48 },
-  { id: 'gda',        label: 'GDA',        cx: 690, cy: 120, badgeX: 690, badgeY: 48 },
-  { id: 'faculty3',   label: 'Faculty 3',  cx: 905, cy: 250, badgeX: 940, badgeY: 48 },
-  { id: 'serverroom', label: 'Server Room', cx: 150, cy: 370, badgeX: 60,  badgeY: 302 },
-  { id: 'comlab2',    label: 'Comlab 2',   cx: 530, cy: 370, badgeX: 530, badgeY: 302 },
-]
-
-function matchRoom(device: Device, roomLabel: string): boolean {
-  const n = device.name.toLowerCase()
-  const r = roomLabel.toLowerCase()
-  if (r === 'faculty 1')          return n.includes('fac') && (n.includes('f1') || n.includes(' 1') || n.endsWith('faculty'))
-  if (r === 'faculty 2')          return n.includes('fac') && (n.includes('f2') || n.includes(' 2'))
-  if (r === 'faculty 3')          return n.includes('fac') && (n.includes('f3') || n.includes(' 3'))
-  if (r === 'accreditation room') return n.includes('accred') || n.includes('acc')
-  if (r === 'netlab')             return n.includes('net') || n.includes('lab') || n.includes('netlab')
-  if (r === 'comlab 1')           return n.includes('comlab') && (n.includes('1') || !n.includes('2'))
-  if (r === 'comlab 2')           return n.includes('comlab') && n.includes('2')
-  if (r === 'maclab')             return n.includes('mac') || n.includes('maclab')
-  if (r === 'aes')                return n.includes('aes')
-  if (r === 'gda')                return n.includes('gda')
-  if (r === 'server room')        return n.includes('server') || n.includes('srv')
-  return false
+function devicesByRoom(rooms: FloorRoom[], devices: Device[]) {
+  const map: Record<string, Device[]> = {}
+  rooms.forEach(r => { map[r.id] = [] })
+  for (const d of devices) {
+    const r = roomOfDevice(d, rooms)
+    if (r && map[r.id]) map[r.id].push(d)
+  }
+  return map
 }
 
-// ─── Floor plan overlays ──────────────────────────────────────────────────────
-
-function FloorOverlay({ rooms, devices, scaleX, scaleY }: {
-  rooms: RoomDef[]
-  devices: Device[]
-  scaleX: number
-  scaleY: number
-}) {
-  const byRoom = useMemo(() => {
-    const matched = new Set<string>()
-    const map: Record<string, Device[]> = {}
-    rooms.forEach(r => {
-      map[r.id] = devices.filter(d => { if (matchRoom(d, r.label)) { matched.add(String(d.id)); return true } return false })
-    })
-    // Leftover → distribute to first room
-    const leftover = devices.filter(d => !matched.has(String(d.id)))
-    if (rooms.length > 0 && leftover.length > 0) map[rooms[0].id] = [...map[rooms[0].id], ...leftover]
-    return map
-  }, [rooms, devices])
-
+// Room name, split onto two lines when long (e.g. "Accreditation / Room")
+export function RoomLabel({ room, color = '#111' }: { room: FloorRoom; color?: string }) {
+  const text = room.label.toUpperCase()
+  const words = text.split(' ')
+  const lines = text.length > 12 && words.length > 1
+    ? [words.slice(0, Math.ceil(words.length / 2)).join(' '), words.slice(Math.ceil(words.length / 2)).join(' ')]
+    : [text]
+  const size = lines.length > 1 ? 14 : 16
   return (
-    <>
-      {rooms.map(r => {
+    <text x={room.x} y={room.y - (lines.length - 1) * 9} textAnchor="middle" dominantBaseline="middle"
+      fontFamily="Arial,Helvetica,sans-serif" fontSize={size} fontWeight="bold" fill={color}
+      transform={room.vertical ? `rotate(-90,${room.x},${room.y})` : undefined} style={{ pointerEvents: 'none' }}>
+      {lines.map((l, i) => <tspan key={i} x={room.x} dy={i ? 18 : 0}>{l}</tspan>)}
+    </text>
+  )
+}
+
+function FloorOverlay({ rooms, byRoom, vbW, vbH, focus, showDevices, onHover }: {
+  rooms: FloorRoom[]
+  byRoom: Record<string, Device[]>
+  vbW: number; vbH: number
+  focus: string | null
+  showDevices: boolean
+  onHover: (room: FloorRoom | null, e?: React.MouseEvent) => void
+}) {
+  return (
+    <svg viewBox={`0 0 ${vbW} ${vbH}`} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}>
+      <style>{`
+        @keyframes fp-ring { 0% { opacity: .55; transform: scale(1); } 100% { opacity: 0; transform: scale(1.35); } }
+        .fp-ring { transform-box: fill-box; transform-origin: center; animation: fp-ring 1.4s ease-out infinite; }
+        @media (prefers-reduced-motion: reduce) { .fp-ring { animation: none; } }
+      `}</style>
+      {rooms.map(r => <RoomLabel key={`label-${r.id}`} room={r}/>)}
+      {showDevices && rooms.map(r => {
         const devs = byRoom[r.id] ?? []
         if (!devs.length) return null
-        const online = devs.filter(d => d.status === 'up').length
-        const bg = online === devs.length ? '#22c55e' : online === 0 ? '#ef4444' : '#f59e0b'
-        const bx = r.badgeX * scaleX
-        const by = r.badgeY * scaleY
-        const cx = r.cx * scaleX
-        const cy = r.cy * scaleY
+        const color = roomHealth(devs)
+        const shown = devs.slice(0, 6)
+        const dotsW = shown.length * 13
+        const text = `${devs.filter(isLive).length}/${devs.length}`
+        const w = 18 + dotsW + text.length * 7 + 8
+        const x = r.x - w / 2, y = r.y + (r.vertical ? 60 : 30)
+        const focused = focus === r.id
         return (
-          <div key={r.id} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
-            {/* Badge */}
-            <div style={{
-              position: 'absolute', left: bx - 20, top: by - 12,
-              background: bg, color: '#fff', borderRadius: 20,
-              padding: '2px 8px', fontSize: 11, fontWeight: 700,
-              boxShadow: '0 2px 6px rgba(0,0,0,.2)',
-            }}>
-              {online}/{devs.length}
-            </div>
-            {/* Device dots */}
-            {devs.slice(0, 4).map((d, i) => (
-              <div key={d.id} style={{
-                position: 'absolute',
-                left: cx - 12 + i * 18,
-                top: cy - 6,
-                width: 12, height: 12,
-                borderRadius: '50%',
-                background: sc(d.status),
-                boxShadow: `0 0 6px ${sc(d.status)}88`,
-              }}/>
+          <g key={r.id} style={{ cursor: 'pointer' }}
+            onMouseMove={e => onHover(r, e)} onMouseLeave={() => onHover(null)}>
+            {focused && <rect className="fp-ring" x={x - 4} y={y - 4} width={w + 8} height={30} rx="15" fill="none" stroke={color} strokeWidth="3"/>}
+            <rect x={x} y={y} width={w} height="22" rx="11" fill="white" stroke={color} strokeWidth={focused ? 2.5 : 1.5}
+              style={{ filter: 'drop-shadow(0 2px 4px rgba(15,23,42,.18))' }}/>
+            {shown.map((d, i) => (
+              <circle key={d.id} cx={x + 14 + i * 13} cy={y + 11} r="4.5" fill={fpSt(d.status).color}/>
             ))}
-          </div>
+            <text x={x + 14 + dotsW + 2} y={y + 15.5} fontSize="12" fontWeight="700" fill={color}>{text}</text>
+          </g>
         )
       })}
-    </>
+    </svg>
   )
 }
 
 // ─── IC Building Floor Plan ───────────────────────────────────────────────────
 
-const FLOOR_1_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 520">
+export const FLOOR_1_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 520">
   <rect width="920" height="520" fill="#c8c8c8"/>
   <rect x="30" y="30" width="860" height="440" fill="white"/>
   <rect x="30" y="215" width="860" height="60" fill="#efefef"/>
@@ -208,7 +195,7 @@ const FLOOR_1_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 52
   <text x="460" y="508" font-family="Arial,Helvetica,sans-serif" font-size="12" text-anchor="middle" fill="#555">IC BUILDING — DNSC</text>
 </svg>`
 
-const FLOOR_2_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 520">
+export const FLOOR_2_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 520">
   <rect width="1020" height="520" fill="#c8c8c8"/>
   <rect x="30" y="30" width="960" height="440" fill="white"/>
   <rect x="30" y="215" width="760" height="60" fill="#efefef"/>
@@ -283,18 +270,41 @@ const FLOOR_2_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 5
   <text x="510" y="508" font-family="Arial,Helvetica,sans-serif" font-size="12" text-anchor="middle" fill="#555">IC BUILDING — DNSC</text>
 </svg>`
 
-// ─── IC Floor Plan component ──────────────────────────────────────────────────
+// ─── IC Floor Plan panel ──────────────────────────────────────────────────────
 
-function ICFloorPlan({ devices, onBack, live = false, onViewRealtime }: { devices: Device[]; onBack: () => void; live?: boolean; onViewRealtime?: () => void }) {
+function ICFloorPlan({ devices, onBack, live = false, onLiveChange }: {
+  devices: Device[]; onBack: () => void; live?: boolean
+  onLiveChange?: (on: boolean) => void   // keeps the View dropdown in step with the Live toggle
+}) {
   const [floor, setFloor] = useState<'1' | '2'>('1')
-  const [containerRef, setContainerRef] = useState<HTMLDivElement | null>(null)
   const [liveDevices, setLiveDevices] = useState<Device[]>(devices)
   const [showLive, setShowLive] = useState(live)
+  const [focus, setFocus] = useState<string | null>(null)                 // room id highlighted from the side panel
+  const [tip, setTip] = useState<{ room: FloorRoom; x: number; y: number } | null>(null)
+  const { rooms: allRooms } = useFloorRooms()
+
+  // Fit the plan to the space left on screen (no page scrolling)
+  const planRef = useRef<HTMLDivElement>(null)
+  const [area, setArea] = useState({ w: 800, h: 460 })
+  useEffect(() => {
+    const el = planRef.current
+    if (!el) return
+    const measure = () => {
+      const top = el.getBoundingClientRect().top
+      const BELOW = 100  // legend + panel/card/page padding under the plan
+      setArea({ w: el.clientWidth, h: Math.max(260, Math.floor(window.innerHeight - top - BELOW)) })
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    window.addEventListener('resize', measure)
+    return () => { ro.disconnect(); window.removeEventListener('resize', measure) }
+  }, [])
 
   useEffect(() => { setLiveDevices(devices) }, [devices])
   useEffect(() => { setShowLive(live) }, [live])
 
-  // Real-time subscription — only active in live mode
+  // Real-time device changes (the page also refreshes every few seconds)
   useEffect(() => {
     if (!showLive) return
     const location = devices[0]?.location ?? ''
@@ -309,278 +319,297 @@ function ICFloorPlan({ devices, onBack, live = false, onViewRealtime }: { device
     return () => { supabase.removeChannel(ch) }
   }, [devices, showLive])
 
-  const svgContent = floor === '1' ? FLOOR_1_SVG : FLOOR_2_SVG
-  const rooms      = floor === '1' ? ROOMS_1ST : ROOMS_2ND
-  const [vbW, vbH] = floor === '1' ? [920, 520] : [1020, 520]
+  const svgContent = useMemo(() => stripRoomLabels(floor === '1' ? FLOOR_1_SVG : FLOOR_2_SVG), [floor])
+  const rooms      = useMemo(() => allRooms.filter(r => String(r.floor) === floor), [allRooms, floor])
+  const [vbW, vbH] = FLOOR_VIEWBOX[floor === '1' ? 1 : 2]
 
-  const containerW = containerRef?.offsetWidth ?? 800
-  const scale      = containerW / vbW
+  const byRoom = useMemo(() => devicesByRoom(rooms, liveDevices), [rooms, liveDevices])
+  // Devices in no room on either floor — listed, not guessed onto the map
+  const unplaced = useMemo(() => liveDevices.filter(d => !roomOfDevice(d, allRooms)), [liveDevices, allRooms])
+  const onFloor = rooms.flatMap(r => byRoom[r.id] ?? [])
+
+  const count = (list: Device[], s: string) => list.filter(d => d.status === s).length
+  const chips: [string, number, string][] = [
+    ['Online', count(onFloor, 'up'), '#16a34a'],
+    ['Warning', count(onFloor, 'warn'), '#d97706'],
+    ['Offline', count(onFloor, 'down') + count(onFloor, 'unreachable'), '#dc2626'],
+  ]
+
+  const tabBtn = (active: boolean): React.CSSProperties => ({
+    padding: '5px 14px', borderRadius: 6, fontSize: 12.5, fontWeight: 600, cursor: 'pointer', border: 'none',
+    background: active ? 'var(--surface)' : 'transparent', color: active ? 'var(--accent2)' : 'var(--text2)',
+    boxShadow: active ? '0 1px 3px rgba(15,23,42,.12)' : 'none',
+  })
 
   return (
-    <div style={{ borderRadius: 10, overflow: 'hidden', border: '1px solid var(--border)' }}>
-      {/* Header bar */}
-      <div style={{ background: '#1e3a5f', display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px' }}>
-        <button onClick={onBack} style={{
-          padding: '4px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-          border: '1px solid rgba(255,255,255,.3)', background: 'rgba(255,255,255,.1)',
-          color: '#fff', cursor: 'pointer',
-        }}>← Back</button>
-
-        <strong style={{ fontSize: 14, color: '#fff', marginRight: 4 }}>IC Building</strong>
-
-        {onViewRealtime && (
-          <button onClick={onViewRealtime} style={{
-            padding: '4px 14px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-            border: 'none', cursor: 'pointer',
-            background: '#2563eb', color: '#fff',
-            display: 'flex', alignItems: 'center', gap: 5,
-          }}>
-            <span style={{ fontSize: 11 }}>📡</span> Real-time Map →
-          </button>
-        )}
-
-        {(['1','2'] as const).map(f => (
-          <button key={f} onClick={() => setFloor(f)} style={{
-            padding: '4px 14px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-            border: 'none', cursor: 'pointer',
-            background: floor === f ? '#fff' : 'rgba(255,255,255,.15)',
-            color: floor === f ? '#1e3a5f' : '#fff',
-          }}>
-            {f}{f === '1' ? 'st' : 'nd'} Floor
-          </button>
+    <div className="card" style={{ borderTop: '3px solid var(--accent)' }}>
+      {/* ── Header ── */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 16px', borderBottom: '1px solid var(--border)', flexWrap: 'wrap' }}>
+        <button suppressHydrationWarning className="btn btn-sm" onClick={onBack}>← Back</button>
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 15 }}>IC Building</div>
+          <div style={{ fontSize: 11.5, color: 'var(--text3)' }}>{onFloor.length} device{onFloor.length === 1 ? '' : 's'} placed on this floor</div>
+        </div>
+        <div style={{ display: 'flex', gap: 2, padding: 3, background: 'var(--surface3)', borderRadius: 8, marginLeft: 8 }}>
+          {(['1', '2'] as const).map(f => (
+            <button suppressHydrationWarning key={f} style={tabBtn(floor === f)} onClick={() => { setFloor(f); setFocus(null) }}>
+              {f === '1' ? '1st' : '2nd'} Floor
+            </button>
+          ))}
+        </div>
+        <span style={{ flex: 1 }}/>
+        {showLive && chips.map(([l, n, c]) => (
+          <span key={l} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, fontWeight: 600, color: c, background: `${c}12`, border: `1px solid ${c}33`, padding: '2px 9px', borderRadius: 12 }}>
+            <span style={{ width: 7, height: 7, borderRadius: '50%', background: c }}/>{n} {l}
+          </span>
         ))}
-
-        {/* Live Devices toggle */}
-        <button onClick={() => setShowLive(v => !v)} style={{
-          marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 7,
-          padding: '4px 14px', borderRadius: 20, fontSize: 12, fontWeight: 600,
-          border: '1px solid rgba(255,255,255,.3)',
-          background: showLive ? '#16a34a' : 'rgba(255,255,255,.12)',
-          color: '#fff', cursor: 'pointer',
-        }}>
+        <button suppressHydrationWarning onClick={() => { const on = !showLive; setShowLive(on); onLiveChange?.(on) }} className="btn btn-sm"
+          style={showLive ? { background: 'var(--accent)', borderColor: 'var(--accent2)', color: '#fff' } : undefined}>
           <span style={{
-            width: 8, height: 8, borderRadius: '50%',
-            background: showLive ? '#4ade80' : '#94a3b8',
-            boxShadow: showLive ? '0 0 6px #4ade80' : 'none',
-            display: 'inline-block',
+            width: 8, height: 8, borderRadius: '50%', display: 'inline-block',
+            background: showLive ? '#bbf7d0' : 'var(--text3)',
             animation: showLive ? 'pulse 1.8s ease-in-out infinite' : 'none',
           }}/>
-          Live Devices
+          Live devices {showLive ? 'on' : 'off'}
         </button>
       </div>
 
-      {/* Floor plan */}
-      <div ref={setContainerRef} style={{ position: 'relative', background: '#f1f5f9', cursor: onViewRealtime ? 'pointer' : 'default' }}
-        onClick={onViewRealtime ? onViewRealtime : undefined}
-        title={onViewRealtime ? 'Tap to open Real-time Map' : undefined}>
-        <div dangerouslySetInnerHTML={{ __html: svgContent.replace(/<svg /, '<svg style="width:100%;height:auto;display:block" ') }}
-          style={{ lineHeight: 0 }}/>
-        {showLive && (
-          <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: `${vbH * scale}px`, pointerEvents: 'none' }}>
-            <FloorOverlay rooms={rooms} devices={liveDevices} scaleX={scale} scaleY={scale}/>
-          </div>
-        )}
-        {onViewRealtime && (
+      {/* ── Plan + side panel ── */}
+      <div style={{ display: 'flex', flexWrap: 'wrap' }}>
+        <div style={{ flex: '1 1 560px', minWidth: 0, padding: 14, background: 'var(--surface2)' }}>
+          {/* The plan keeps its proportions and is as large as fits both width and height */}
+          <div ref={planRef} style={{ display: 'flex', justifyContent: 'center' }}>
           <div style={{
-            position: 'absolute', bottom: 12, right: 12,
-            background: 'rgba(37,99,235,.88)', color: '#fff',
-            borderRadius: 8, padding: '6px 14px', fontSize: 12, fontWeight: 600,
-            pointerEvents: 'none', display: 'flex', alignItems: 'center', gap: 5,
-            boxShadow: '0 2px 8px rgba(0,0,0,.2)',
-          }}>
-            <span>📡</span> Tap to view Real-time Map
+            position: 'relative', borderRadius: 10, overflow: 'hidden', border: '1px solid var(--border)', background: '#fff',
+            width: Math.min(area.w, area.h * (vbW / vbH)), height: Math.min(area.w, area.h * (vbW / vbH)) / (vbW / vbH),
+          }}
+            onMouseLeave={() => setTip(null)}>
+            <div dangerouslySetInnerHTML={{ __html: svgContent.replace(/<svg /, '<svg style="width:100%;height:100%;display:block" preserveAspectRatio="xMidYMid meet" ') }}
+              style={{ lineHeight: 0, width: '100%', height: '100%' }}/>
+            {/* Room names always; device markers only when Live is on */}
+            <FloorOverlay rooms={rooms} byRoom={byRoom} vbW={vbW} vbH={vbH} focus={focus} showDevices={showLive}
+              onHover={(room, e) => setTip(room && e ? { room, x: e.clientX, y: e.clientY } : null)}/>
+            <div style={{ position: 'absolute', left: 12, bottom: 10, fontSize: 11, fontWeight: 700, letterSpacing: '.08em', color: '#64748b', background: 'rgba(255,255,255,.85)', padding: '3px 9px', borderRadius: 6 }}>
+              {floor === '1' ? '1ST FLOOR' : '2ND FLOOR'}
+            </div>
           </div>
-        )}
+          </div>
+          {/* Legend */}
+          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', padding: '10px 2px 0', fontSize: 12, color: 'var(--text2)' }}>
+            {(['up', 'warn', 'unreachable', 'down'] as const).map(k => (
+              <span key={k} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                <span style={{ width: 9, height: 9, borderRadius: '50%', background: FP_STATUS[k].color }}/>{FP_STATUS[k].label}
+              </span>
+            ))}
+            <span style={{ marginLeft: 'auto', color: 'var(--text3)' }}>Hover a room marker for its devices</span>
+          </div>
+        </div>
+
+        {/* Side panel */}
+        <div style={{ flex: '0 0 300px', maxWidth: '100%', borderLeft: '1px solid var(--border)', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ padding: '12px 14px 6px', fontSize: 11, fontWeight: 700, color: 'var(--text3)', letterSpacing: '.06em' }}>ROOMS</div>
+          <div style={{ overflowY: 'auto', maxHeight: area.h + 10 }}>
+            {rooms.map(r => {
+              const devs = byRoom[r.id] ?? []
+              const color = devs.length ? roomHealth(devs) : '#cbd5e1'
+              const active = focus === r.id
+              return (
+                <div key={r.id}
+                  onClick={() => setFocus(f => f === r.id ? null : r.id)}
+                  style={{ padding: '8px 14px', cursor: 'pointer', borderLeft: `3px solid ${active ? color : 'transparent'}`, background: active ? 'var(--surface2)' : undefined }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ width: 9, height: 9, borderRadius: '50%', background: color, flexShrink: 0 }}/>
+                    <span style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>{r.label}</span>
+                    <span style={{ fontSize: 12, color: devs.length ? color : 'var(--text3)', fontWeight: 600 }}>
+                      {devs.length ? `${devs.filter(isLive).length}/${devs.length} online` : 'No devices'}
+                    </span>
+                  </div>
+                  {(active || devs.some(d => !isLive(d))) && devs.length > 0 && (
+                    <div style={{ marginTop: 4, paddingLeft: 17 }}>
+                      {(active ? devs : devs.filter(d => !isLive(d))).map(d => (
+                        <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, padding: '2px 0' }}>
+                          <span style={{ width: 6, height: 6, borderRadius: '50%', background: fpSt(d.status).color }}/>
+                          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</span>
+                          <span style={{ color: fpSt(d.status).color, fontSize: 11 }}>{fpSt(d.status).label}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+
+            {unplaced.length > 0 && (
+              <div style={{ borderTop: '1px solid var(--border)', marginTop: 6, padding: '10px 14px 14px' }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text3)', letterSpacing: '.06em', marginBottom: 4 }}>
+                  NOT IN A ROOM ({unplaced.length})
+                </div>
+                <div style={{ fontSize: 11.5, color: 'var(--text3)', marginBottom: 6 }}>
+                  Assign a room in <a href="/settings?tab=manage" style={{ color: 'var(--accent)' }}>Settings → Manage</a> to place them on the map.
+                </div>
+                {unplaced.map(d => (
+                  <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, padding: '3px 0' }}>
+                    <span style={{ width: 6, height: 6, borderRadius: '50%', background: fpSt(d.status).color }}/>
+                    <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</span>
+                    <span className="mono" style={{ fontSize: 11, color: 'var(--text3)' }}>{d.ip}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
-      {/* Footer bar */}
-      <div style={{ background: '#1e3a5f', color: '#fff', textAlign: 'center', padding: '10px', fontWeight: 700, fontSize: 13, letterSpacing: 2 }}>
-        {floor === '1' ? '1ST FLOOR' : '2ND FLOOR'}
-      </div>
-
-      {/* Legend */}
-      <div style={{ display: 'flex', gap: 20, padding: '8px 14px', fontSize: 12 }}>
-        {[['#22c55e','Online'],['#f59e0b','Warning'],['#ef4444','Offline']].map(([c,l]) => (
-          <span key={l} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-            <span style={{ width: 10, height: 10, borderRadius: '50%', background: c, display: 'inline-block' }}/>
-            {l}
-          </span>
-        ))}
-      </div>
+      {/* Hover: room devices */}
+      {tip && (() => {
+        const devs = byRoom[tip.room.id] ?? []
+        const left = tip.x + 260 > window.innerWidth ? tip.x - 256 : tip.x + 14
+        const top = tip.y + 40 + devs.length * 22 > window.innerHeight ? tip.y - 40 - devs.length * 22 : tip.y + 14
+        return (
+          <div style={{ position: 'fixed', left, top, width: 240, zIndex: 50, pointerEvents: 'none', background: '#fff', border: '1px solid var(--border)', borderRadius: 10, boxShadow: '0 10px 30px rgba(15,23,42,.18)', fontSize: 12, overflow: 'hidden' }}>
+            <div style={{ padding: '8px 12px', fontWeight: 700, borderBottom: '1px solid var(--border)', display: 'flex' }}>
+              <span style={{ flex: 1 }}>{tip.room.label}</span>
+              <span style={{ color: roomHealth(devs) }}>{devs.filter(isLive).length}/{devs.length} online</span>
+            </div>
+            <div style={{ padding: '6px 12px' }}>
+              {devs.map(d => (
+                <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0' }}>
+                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: fpSt(d.status).color }}/>
+                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</span>
+                  <span className="mono" style={{ color: 'var(--text3)', fontSize: 11 }}>{d.ip}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )
+      })()}
     </div>
   )
 }
 
 // ─── Buildings View ───────────────────────────────────────────────────────────
 
-function BuildingsView({ groups, onSelectBldg }: { groups: BldgGroup[]; onSelectBldg: (name: string) => void }) {
-  const [tipIdx, setTipIdx] = useState<number | null>(null)
-  const W = 900, H = 280
+// One card per location: health, status breakdown, devices, floor plan link.
+const B_STATUS: { key: string; label: string; color: string }[] = [
+  { key: 'up',          label: 'Online',      color: '#16a34a' },
+  { key: 'warn',        label: 'Warning',     color: '#d97706' },
+  { key: 'unreachable', label: 'Unreachable', color: '#f59e0b' },
+  { key: 'down',        label: 'Offline',     color: '#dc2626' },
+  { key: 'unknown',     label: 'Unknown',     color: '#94a3b8' },
+]
+const bColor = (s: string) => B_STATUS.find(x => x.key === s)?.color ?? '#94a3b8'
 
-  const sorted = [...groups].sort((a, b) => b.total - a.total)
-  const core = sorted[0]
-  const rest = sorted.slice(1)
-
-  const corePos = { x: W / 2, y: 70 }
-  const restPos = rest.map((_, i) => ({
-    x: rest.length === 1 ? W / 2 : 100 + (i / Math.max(rest.length - 1, 1)) * (W - 200),
-    y: 190,
-  }))
-  const allPos    = [corePos, ...restPos]
-  const allGroups = [core, ...rest]
-
-  return (
-    <div style={{ position: 'relative' }}>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', display: 'block', background: '#eef3f8', borderRadius: 8, minHeight: 200 }}>
-        {/* Curved arc connections */}
-        {rest.map((_, i) => {
-          const x1 = corePos.x, y1 = corePos.y + 32
-          const x2 = restPos[i].x, y2 = restPos[i].y - 35
-          const mx = (x1 + x2) / 2, my = (y1 + y2) / 2 + 20
-          return (
-            <path key={i}
-              d={`M ${x1} ${y1} Q ${mx} ${my} ${x2} ${y2}`}
-              fill="none" stroke="#9ca3af" strokeWidth="2" opacity="0.85"/>
-          )
-        })}
-
-        {/* Building nodes */}
-        {allGroups.map((g, i) => {
-          if (!g) return null
-          const { x, y } = allPos[i]
-          const border = bldgBorder(g)
-          const imgSize = 48
-          return (
-            <g key={g.name} transform={`translate(${x},${y})`}
-              style={{ cursor: 'pointer' }}
-              onMouseEnter={() => setTipIdx(i)}
-              onMouseLeave={() => setTipIdx(null)}
-              onClick={() => onSelectBldg(g.name)}>
-              {/* Border frame */}
-              <rect x={-imgSize/2 - 3} y={-imgSize/2 - 3} width={imgSize + 6} height={imgSize + 6}
-                rx="5" fill="white" stroke={border} strokeWidth="3"/>
-              <image href={g.imageUrl} x={-imgSize/2} y={-imgSize/2} width={imgSize} height={imgSize}
-                style={{ objectFit: 'cover', borderRadius: 3 }}/>
-              <text y={imgSize/2 + 14} textAnchor="middle" fill="#1e293b" fontSize="11" fontWeight="700">{g.name}</text>
-              <text y={imgSize/2 + 26} textAnchor="middle" fill="#64748b" fontSize="10">{g.online}/{g.total} online</text>
-            </g>
-          )
-        })}
-
-        {/* Tooltip */}
-        {tipIdx !== null && allGroups[tipIdx] && (() => {
-          const g = allGroups[tipIdx]
-          const { x, y } = allPos[tipIdx]
-          const tx = Math.min(x + 50, W - 185)
-          const ty = Math.max(y - 100, 10)
-          return (
-            <g transform={`translate(${tx},${ty})`} style={{ pointerEvents: 'none' }}>
-              <rect width="175" height="92" rx="6" fill="white" stroke={bldgBorder(g)} strokeWidth="1.5"
-                style={{ filter: 'drop-shadow(0 2px 8px rgba(0,0,0,.12))' }}/>
-              <text x="10" y="20" fill="#1e293b" fontSize="12" fontWeight="700">{g.name}</text>
-              {[
-                ['Total', g.total],
-                ['Online', `${g.online} / ${g.total}`],
-                ['Warning', g.warn],
-                ['Offline', g.total - g.online - g.warn],
-              ].map(([k, v], j) => (
-                <g key={String(k)} transform={`translate(10,${36 + j * 14})`}>
-                  <text fill="#64748b" fontSize="10">{k}</text>
-                  <text x="80" fill="#1e293b" fontSize="10" fontWeight="600">{v}</text>
-                </g>
-              ))}
-            </g>
-          )
-        })()}
-
-        {/* Legend */}
-        <g transform="translate(16,262)">
-          {[['#22c55e','All online'],['#f59e0b','Partial'],['#ef4444','All offline']].map(([c,l],i) => (
-            <g key={l} transform={`translate(${i*130},0)`}>
-              <rect width="12" height="12" rx="3" fill={c}/>
-              <text x="18" y="10" fill="#64748b" fontSize="11">{l}</text>
-            </g>
-          ))}
-        </g>
-      </svg>
-    </div>
-  )
+function bldgHealth(g: BldgGroup) {
+  const live = g.devices.filter(d => d.status === 'up' || d.status === 'warn').length
+  const down = g.devices.filter(d => d.status === 'down').length
+  if (!g.total) return { label: 'No devices', color: '#94a3b8', bg: '#f8fafc' }
+  if (down === 0 && live === g.total && !g.devices.some(d => d.status === 'warn')) return { label: 'Healthy', color: '#16a34a', bg: '#f0fdf4' }
+  if (live === 0) return { label: 'Down', color: '#dc2626', bg: '#fef2f2' }
+  return { label: 'Degraded', color: '#d97706', bg: '#fffbeb' }
 }
 
-// ─── Floor-based Map ──────────────────────────────────────────────────────────
+function BuildingsView({ groups, onSelectBldg }: { groups: BldgGroup[]; onSelectBldg: (name: string) => void }) {
+  const isUnassigned = (n: string) => !n || n === 'Unassigned'
+  // Real buildings first (most devices first), "Unassigned" last
+  const sorted = [...groups].sort((a, b) =>
+    Number(isUnassigned(a.name)) - Number(isUnassigned(b.name)) || b.total - a.total || a.name.localeCompare(b.name))
 
-function FloorBasedMap({ groups, onSelectBldg }: { groups: BldgGroup[]; onSelectBldg: (name: string) => void }) {
-  const [liveFilter, setLiveFilter] = useState<'active' | 'inactive'>('inactive')
+  const all = groups.flatMap(g => g.devices)
+  const liveAll = all.filter(d => d.status === 'up' || d.status === 'warn').length
+  const pct = all.length ? Math.round((liveAll / all.length) * 100) : 0
+
+  if (!groups.length) return (
+    <div style={{ padding: 40, textAlign: 'center', color: 'var(--text3)' }}>No devices match the current filters.</div>
+  )
 
   return (
     <div>
-      {/* Header row with toggle */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
-        <div style={{ fontWeight: 600, fontSize: 15 }}>Select a Building to view its floor plan</div>
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 0, borderRadius: 8, overflow: 'hidden', border: '1px solid var(--accent)' }}>
-          {(['active','inactive'] as const).map(f => (
-            <button key={f} onClick={() => setLiveFilter(f)} style={{
-              padding: '5px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', border: 'none',
-              background: liveFilter === f ? 'var(--accent)' : 'transparent',
-              color: liveFilter === f ? '#fff' : 'var(--accent)',
-              transition: 'background .15s',
-            }}>
-              {f === 'active' ? '● Active' : '○ Inactive'}
-            </button>
-          ))}
-        </div>
+      {/* Summary */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 16, fontSize: 13 }}>
+        <strong>{groups.filter(g => !isUnassigned(g.name)).length} location{groups.filter(g => !isUnassigned(g.name)).length === 1 ? '' : 's'}</strong>
+        <span style={{ color: 'var(--text3)' }}>{all.length} devices · {pct}% online</span>
+        <span style={{ flex: 1 }}/>
+        {[['#16a34a', 'Healthy'], ['#d97706', 'Degraded'], ['#dc2626', 'Down']].map(([c, l]) => (
+          <span key={l} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text2)' }}>
+            <span style={{ width: 9, height: 9, borderRadius: 3, background: c }}/>{l}
+          </span>
+        ))}
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(220px,1fr))', gap: 16 }}>
-        {groups.map(g => {
-          const shown = liveFilter === 'active'
-            ? g.devices.filter(d => d.status === 'up')
-            : g.devices.filter(d => d.status !== 'up')
-
+      <div style={{ display: 'grid', gridTemplateColumns: `repeat(auto-fit, minmax(${sorted.length <= 2 ? 380 : 300}px, 1fr))`, gap: 16 }}>
+        {sorted.map(g => {
+          const h = bldgHealth(g)
+          const unassigned = isUnassigned(g.name)
+          const counts = B_STATUS.map(s => ({ ...s, n: g.devices.filter(d => (d.status === s.key) || (s.key === 'unknown' && !B_STATUS.some(x => x.key === d.status))).length }))
+          const devList = [...g.devices].sort((a, b) =>
+            ['down', 'unreachable', 'warn', 'unknown', 'up'].indexOf(a.status) - ['down', 'unreachable', 'warn', 'unknown', 'up'].indexOf(b.status) || a.name.localeCompare(b.name))
           return (
-            <div key={g.name} style={{
-              background: 'white', borderRadius: 10, overflow: 'hidden',
-              border: '1px solid var(--border)', boxShadow: '0 1px 4px rgba(0,0,0,.06)',
+            <div key={g.name} className="card" style={{
+              display: 'flex', flexDirection: 'column', borderTop: `3px solid ${h.color}`,
+              borderStyle: unassigned ? 'dashed' : undefined, borderTopStyle: 'solid',
             }}>
-              <div style={{ background: '#eef3f8', display: 'flex', justifyContent: 'center', padding: '20px 0 12px' }}>
-                <Image src={g.imageUrl} alt={g.name} width={100} height={100}
-                  style={{ objectFit: 'contain', borderRadius: 6 }}/>
-              </div>
-              <div style={{ padding: '12px 14px' }}>
-                <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 2 }}>{g.name}</div>
-                <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 8 }}>
-                  {g.total} device{g.total !== 1 ? 's' : ''} · {g.online} online
+              {/* Header */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '14px 16px 10px' }}>
+                <div style={{ width: 52, height: 52, borderRadius: 12, background: h.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <Image src={g.imageUrl} alt="" width={38} height={38} style={{ objectFit: 'contain', opacity: unassigned ? .6 : 1 }}/>
                 </div>
-
-                {/* Device list filtered by toggle */}
-                {shown.length > 0 ? (
-                  <div style={{ marginBottom: 10 }}>
-                    {shown.slice(0, 4).map(d => (
-                      <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, marginBottom: 3 }}>
-                        <span style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-                          background: d.status === 'up' ? '#22c55e' : d.status === 'warn' ? '#f59e0b' : '#ef4444' }}/>
-                        <span style={{ color: 'var(--text2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {d.name}
-                        </span>
-                      </div>
-                    ))}
-                    {shown.length > 4 && (
-                      <div style={{ fontSize: 11, color: 'var(--text3)' }}>+{shown.length - 4} more</div>
-                    )}
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontWeight: 700, fontSize: 15, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {unassigned ? 'Unassigned' : g.name}
                   </div>
-                ) : (
-                  <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 10 }}>
-                    No {liveFilter} devices
+                  <div style={{ fontSize: 12, color: 'var(--text3)' }}>
+                    {g.total} device{g.total === 1 ? '' : 's'} · {g.devices.filter(d => d.status === 'up' || d.status === 'warn').length} online
+                  </div>
+                </div>
+                <span style={{ fontSize: 11, fontWeight: 700, color: h.color, background: h.bg, border: `1px solid ${h.color}44`, padding: '3px 10px', borderRadius: 12, flexShrink: 0 }}>
+                  {h.label}
+                </span>
+              </div>
+
+              {/* Status bar */}
+              <div style={{ padding: '0 16px' }}>
+                <div style={{ display: 'flex', height: 8, borderRadius: 4, overflow: 'hidden', background: '#eef2f6' }}>
+                  {counts.filter(c => c.n).map(c => (
+                    <div key={c.key} title={`${c.n} ${c.label}`} style={{ width: `${(c.n / Math.max(g.total, 1)) * 100}%`, background: c.color }}/>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 12px', marginTop: 8, fontSize: 11.5, color: 'var(--text2)' }}>
+                  {counts.filter(c => c.n).map(c => (
+                    <span key={c.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                      <span style={{ width: 7, height: 7, borderRadius: '50%', background: c.color }}/>{c.n} {c.label}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Devices (problems first) */}
+              <div style={{ padding: '10px 16px 4px', flex: 1 }}>
+                {devList.slice(0, 5).map(d => (
+                  <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0', borderTop: '1px solid var(--border)', fontSize: 12.5 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: bColor(d.status), flexShrink: 0 }}/>
+                    <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</span>
+                    <span className="mono" style={{ fontSize: 11, color: 'var(--text3)' }}>{d.ip}</span>
+                  </div>
+                ))}
+                {devList.length > 5 && (
+                  <div style={{ fontSize: 11.5, color: 'var(--text3)', padding: '5px 0', borderTop: '1px solid var(--border)' }}>
+                    +{devList.length - 5} more
                   </div>
                 )}
+              </div>
 
+              {/* Footer */}
+              <div style={{ padding: '10px 16px 14px', display: 'flex', alignItems: 'center', gap: 8 }}>
                 {g.hasFloorPlan ? (
-                  <button className="btn btn-sm" style={{ color: 'var(--accent)', borderColor: 'var(--accent)' }}
-                    onClick={() => onSelectBldg(g.name)}>
-                    View Floor Plan →
+                  <button suppressHydrationWarning className="btn btn-sm btn-primary" onClick={() => onSelectBldg(g.name)}>
+                    View floor plan →
                   </button>
+                ) : unassigned ? (
+                  <span style={{ fontSize: 12, color: 'var(--text3)' }}>
+                    Set a location for these devices on the <a href="/devices" style={{ color: 'var(--accent)' }}>Devices</a> page
+                  </span>
                 ) : (
-                  <span style={{ fontSize: 12, color: 'var(--text3)' }}>No floor plan available</span>
+                  <span style={{ fontSize: 12, color: 'var(--text3)' }}>No floor plan for this building</span>
                 )}
               </div>
             </div>
@@ -593,38 +622,35 @@ function FloorBasedMap({ groups, onSelectBldg }: { groups: BldgGroup[]; onSelect
 
 // ─── Filter bar styles ────────────────────────────────────────────────────────
 
+// Clean, light filter bar in the app's card style (white surface, thin
+// border, green accent) — sits flush on top of the card below it.
 const FB: React.CSSProperties = {
-  background: 'linear-gradient(180deg,#1a5c2a 0%,#124018 100%)',
-  display: 'flex', alignItems: 'stretch',
-  borderRadius: '10px 10px 0 0', borderBottom: '1px solid #0a2e14',
+  background: 'var(--surface)',
+  border: '1px solid var(--border)',
+  borderTop: '3px solid var(--accent)',
+  borderRadius: '10px 10px 0 0',
+  display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+  gap: 12, padding: '12px 16px',
 }
-const FI: React.CSSProperties = {
-  flex: 1, padding: '10px 16px',
-  borderRight: '1px solid rgba(255,255,255,.1)',
-  display: 'flex', flexDirection: 'column', gap: 4,
-}
-const FL: React.CSSProperties = {
-  fontSize: 10, fontWeight: 700, color: 'rgba(255,255,255,.55)',
-  letterSpacing: '.1em', textTransform: 'uppercase',
-  display: 'flex', alignItems: 'center', gap: 5,
-}
-const FS: React.CSSProperties = {
-  background: 'rgba(0,0,0,.2)', border: '1px solid rgba(255,255,255,.15)',
-  borderRadius: 6, color: '#fff', fontSize: 12, fontWeight: 500,
-  padding: '5px 10px', cursor: 'pointer', outline: 'none', width: '100%',
-}
+const FI: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0 }
+const FL: React.CSSProperties = { fontSize: 11.5, fontWeight: 600, color: 'var(--text3)' }
+const FS: React.CSSProperties = { cursor: 'pointer', fontWeight: 500 }
 
 // ─── Main Hub ─────────────────────────────────────────────────────────────────
 
-export default function TopologyHub({ devs, clientCounts = {} }: {
+// mode="topology"  → Topology page: Topology Tree + Buildings View only
+// mode="floorplan" → Floor Plan page: Real-time Map (default) + Floor-based Map only
+export default function TopologyHub({ devs, clientCounts = {}, mode, initialBldg }: {
   devs: Device[]
   clientCounts?: Record<string, number>
+  mode: 'topology' | 'floorplan'
+  initialBldg?: string
 }) {
-  const [viewMode,     setViewMode]     = useState<ViewMode>('buildings')
-  const [bldgFilter,   setBldgFilter]   = useState('all')
+  const router = useRouter()
+  const [viewMode,     setViewMode]     = useState<ViewMode>(mode === 'topology' ? 'tree' : 'realtime')
+  const [bldgFilter,   setBldgFilter]   = useState(initialBldg ?? 'all')
   const [statusFilter, setStatusFilter] = useState('all')
   const [typeFilter,   setTypeFilter]   = useState('all')
-  const [floorBldg,    setFloorBldg]    = useState<string | null>(null)
 
   // ── Scan-derived devices for Topology Tree ─────────────────────────────────
   const [scanDevs,    setScanDevs]    = useState<Device[] | null>(null)
@@ -692,6 +718,20 @@ export default function TopologyHub({ devs, clientCounts = {} }: {
     if (viewMode === 'tree' && scanDevs === null) fetchScan()
   }, [viewMode, scanDevs, fetchScan])
 
+  // Keep the tree current without a manual refresh (quietly, no "Scanning…" screen)
+  useEffect(() => {
+    if (viewMode !== 'tree') return
+    const t = setInterval(async () => {
+      if (document.visibilityState !== 'visible') return
+      try {
+        const data = await (await fetch('/api/scan')).json()
+        if (data.results?.length) setScanDevs(convertScan(data.results))
+      } catch { /* keep the current tree */ }
+    }, 10_000)
+    return () => clearInterval(t)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewMode])
+
   const bldgGroups = useMemo<BldgGroup[]>(() => {
     const map = new Map<string, Device[]>()
     devs.forEach(d => {
@@ -722,29 +762,15 @@ export default function TopologyHub({ devs, clientCounts = {} }: {
   )
   const filteredGroups = bldgFilter === 'all' ? bldgGroups : bldgGroups.filter(g => g.name === bldgFilter)
 
-  const VIEW_OPTIONS = [
-    { value: 'buildings' as ViewMode, label: 'Buildings View',  icon: '🏢' },
-    { value: 'tree'      as ViewMode, label: 'Topology Tree',   icon: '🌐' },
-    { value: 'floormap'  as ViewMode, label: 'Floor-based Map', icon: '🗺' },
-    { value: 'realtime'  as ViewMode, label: 'Real-time Map',   icon: '📡' },
-  ]
-
-  // Floor plan detail overlay
-  if (floorBldg) {
-    const bldgDevices = devs.filter(d => d.location === floorBldg)
-    return (
-      <div>
-        <FilterBar viewMode={viewMode} setViewMode={setViewMode} bldgFilter={bldgFilter}
-          setBldgFilter={setBldgFilter} statusFilter={statusFilter} setStatusFilter={setStatusFilter}
-          typeFilter={typeFilter} setTypeFilter={setTypeFilter}
-          bldgGroups={bldgGroups} devs={devs} deviceTypes={deviceTypes} viewOptions={VIEW_OPTIONS}/>
-        <div style={{ marginTop: 2 }}>
-          <ICFloorPlan devices={bldgDevices} onBack={() => { setFloorBldg(null); setViewMode('buildings') }} live={viewMode === 'realtime'}
-            onViewRealtime={viewMode !== 'realtime' ? () => setViewMode('realtime') : undefined}/>
-        </div>
-      </div>
-    )
-  }
+  const VIEW_OPTIONS = mode === 'topology'
+    ? [
+        { value: 'tree'      as ViewMode, label: 'Topology Tree',   icon: '🌐' },
+        { value: 'buildings' as ViewMode, label: 'Buildings View',  icon: '🏢' },
+      ]
+    : [
+        { value: 'realtime'  as ViewMode, label: 'Real-time Map',   icon: '📡' },
+        { value: 'floormap'  as ViewMode, label: 'Floor-based Map', icon: '🗺' },
+      ]
 
   return (
     <div>
@@ -756,17 +782,25 @@ export default function TopologyHub({ devs, clientCounts = {} }: {
       <div className="card" style={{ borderRadius: '0 0 10px 10px', borderTop: 'none' }}>
         <div className="card-body" style={{ padding: viewMode === 'tree' ? 0 : 20 }}>
 
-          {viewMode === 'buildings' && <BuildingsView groups={filteredGroups} onSelectBldg={name => { setFloorBldg(name); setViewMode('floormap') }}/>}
+          {viewMode === 'buildings' && (
+            <BuildingsView groups={filteredGroups}
+              onSelectBldg={name => router.push(`/floorplan?bldg=${encodeURIComponent(name)}`)}/>
+          )}
 
           {viewMode === 'tree' && (() => {
-            if (scanLoading) return (
+            if (scanLoading && !devs.length) return (
               <div style={{ padding: 48, textAlign: 'center', color: 'var(--text3)' }}>
                 <div style={{ fontSize: 28, marginBottom: 10 }}>📡</div>
                 <div style={{ fontWeight: 600, marginBottom: 6 }}>Scanning network…</div>
                 <div style={{ fontSize: 12 }}>Running ICMP + ARP on {scanSubnet}.0/24</div>
               </div>
             )
-            if (!scanDevs?.length) return (
+            // Inventory (real names, MAC, vendor, live status) + scan hosts not registered yet
+            const knownIps  = new Set(devs.map(d => d.ip))
+            const knownMacs = new Set(devs.map(d => d.mac?.toUpperCase()).filter(Boolean) as string[])
+            const unregistered = (scanDevs ?? []).filter(d => !knownIps.has(d.ip) && !(d.mac && knownMacs.has(d.mac.toUpperCase())))
+            const allTree = [...devs.filter(d => d.status !== 'maint' || statusFilter === 'maint'), ...unregistered]
+            if (!allTree.length) return (
               <div style={{ padding: 48, textAlign: 'center', color: 'var(--text3)' }}>
                 <div style={{ fontSize: 28, marginBottom: 10 }}>🔍</div>
                 <div style={{ fontWeight: 600, marginBottom: 6 }}>No scan results yet</div>
@@ -780,48 +814,67 @@ export default function TopologyHub({ devs, clientCounts = {} }: {
                 </div>
               </div>
             )
-            const treeDevs = scanDevs.filter(d =>
+            const treeDevs = allTree.filter(d =>
               (statusFilter === 'all' || d.status === statusFilter) &&
-              (typeFilter   === 'all' || d.type   === typeFilter)
+              (typeFilter   === 'all' || d.type   === typeFilter) &&
+              (bldgFilter   === 'all' || d.location === bldgFilter)
             )
+            const count = (fn: (d: Device) => boolean) => allTree.filter(fn).length
+            const chips: [string, number, string][] = [
+              ['Online',      count(d => d.status === 'up'),   '#16a34a'],
+              ['Warning',     count(d => d.status === 'warn'), '#d97706'],
+              ['Unreachable', count(d => d.status === 'unreachable'), '#f59e0b'],
+              ['Offline',     count(d => d.status === 'down'), '#dc2626'],
+              ['Unknown',     count(d => d.status === 'unknown'), '#94a3b8'],
+            ]
+            const networks = new Set(allTree.map(d => d.ip.split('.').slice(0, 3).join('.'))).size
             return (
               <div>
                 {/* Tree toolbar */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', background: '#f8fafc', borderBottom: '1px solid var(--border)', fontSize: 12 }}>
-                  <span style={{ color: 'var(--text3)' }}>
-                    {scanDevs.length} devices discovered · {scanDevs.filter(d => d.status === 'up').length} online
-                  </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', background: '#f8fafc', borderBottom: '1px solid var(--border)', fontSize: 12, flexWrap: 'wrap' }}>
+                  <strong style={{ color: 'var(--text)' }}>{allTree.length} devices</strong>
+                  <span style={{ color: 'var(--text3)' }}>on {networks} network{networks === 1 ? '' : 's'}</span>
+                  <span style={{ width: 1, height: 16, background: 'var(--border)', margin: '0 4px' }}/>
+                  {chips.filter(([, n]) => n > 0).map(([label, n, color]) => (
+                    <span key={label} style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 5, padding: '2px 9px', borderRadius: 12,
+                      background: `${color}14`, color, fontWeight: 600, border: `1px solid ${color}33`,
+                    }}>
+                      <span style={{ width: 7, height: 7, borderRadius: '50%', background: color }}/>{n} {label}
+                    </span>
+                  ))}
+                  {unregistered.length > 0 && (
+                    <span style={{ color: 'var(--text3)' }} title="Seen by the scanner but not yet in the device inventory">· {unregistered.length} not registered</span>
+                  )}
                   <span style={{ flex: 1 }}/>
-                  <input suppressHydrationWarning className="form-input" style={{ width: 120, fontSize: 11 }}
-                    value={scanSubnet}
-                    onChange={e => { setScanSubnet(e.target.value); localStorage.setItem('nms_scan_subnet', e.target.value) }}
-                    placeholder="192.168.1"/>
-                  <button suppressHydrationWarning className="btn btn-sm" onClick={() => { setScanDevs(null); fetchScan(scanSubnet) }} disabled={scanLoading}>
-                    {scanLoading ? 'Scanning…' : '↺ Rescan'}
-                  </button>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: 'var(--text3)' }}>
+                    <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--ok)', animation: 'pulse 1.8s ease-in-out infinite' }}/>
+                    Live · updates automatically
+                  </span>
                 </div>
                 <TopologyCanvas devs={treeDevs} clientCounts={clientCounts}/>
               </div>
             )
           })()}
 
-          {viewMode === 'floormap' && (
-            <FloorBasedMap
-              groups={filteredGroups}
-              onSelectBldg={name => { setFloorBldg(name); setViewMode('realtime') }}/>
-          )}
-
-          {viewMode === 'realtime' && (
+          {/* Floor-based Map = the floor plan with live devices off;
+              Real-time Map = the same plan with live devices on.
+              The panel's Live toggle switches between the two views. */}
+          {(viewMode === 'floormap' || viewMode === 'realtime') && (
             filteredGroups.some(g => g.hasFloorPlan) ? (
               filteredGroups.filter(g => g.hasFloorPlan).map(g => (
-                <ICFloorPlan key={g.name} devices={g.devices} onBack={() => setViewMode('floormap')} live/>
+                <div key={g.name} style={{ marginBottom: 16 }}>
+                  <ICFloorPlan devices={g.devices} live={viewMode === 'realtime'}
+                    onLiveChange={on => setViewMode(on ? 'realtime' : 'floormap')}
+                    onBack={() => router.push('/topology')}/>
+                </div>
               ))
             ) : (
               <div style={{ padding: 40, textAlign: 'center', color: 'var(--text3)' }}>
                 <div style={{ fontSize: 32, marginBottom: 10 }}>🗺</div>
-                <div style={{ fontWeight: 600 }}>No floor plan for selected building</div>
-                <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={() => setViewMode('floormap')}>
-                  ← Select a Building
+                <div style={{ fontWeight: 600 }}>No floor plan for the selected building</div>
+                <button suppressHydrationWarning className="btn btn-sm" style={{ marginTop: 12 }} onClick={() => setBldgFilter('all')}>
+                  Show all buildings
                 </button>
               </div>
             )
@@ -847,30 +900,32 @@ function FilterBar({ viewMode, setViewMode, bldgFilter, setBldgFilter, statusFil
   return (
     <div style={FB}>
       <div style={FI}>
-        <div style={FL}><span>⊞</span> VIEW MODE</div>
-        <select suppressHydrationWarning style={FS} value={viewMode} onChange={e => setViewMode(e.target.value as ViewMode)}>
-          {viewOptions.map(o => <option key={o.value} value={o.value}>{o.icon} {o.label}</option>)}
+        <label style={FL}>View</label>
+        <select suppressHydrationWarning className="form-select" style={FS} value={viewMode} onChange={e => setViewMode(e.target.value as ViewMode)}>
+          {viewOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
       </div>
       <div style={FI}>
-        <div style={FL}><span>🏗</span> BUILDING ZONE</div>
-        <select suppressHydrationWarning style={FS} value={bldgFilter} onChange={e => setBldgFilter(e.target.value)}>
+        <label style={FL}>Building</label>
+        <select suppressHydrationWarning className="form-select" style={FS} value={bldgFilter} onChange={e => setBldgFilter(e.target.value)}>
           <option value="all">All Buildings ({bldgGroups.reduce((s,g)=>s+g.total,0)})</option>
           {bldgGroups.map(g => <option key={g.name} value={g.name}>{g.name} ({g.total})</option>)}
         </select>
       </div>
       <div style={FI}>
-        <div style={FL}><span>📶</span> OPERATIONAL STATUS</div>
-        <select suppressHydrationWarning style={FS} value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
+        <label style={FL}>Status</label>
+        <select suppressHydrationWarning className="form-select" style={FS} value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
           <option value="all">All Statuses ({devs.length})</option>
           <option value="up">Online ({devs.filter(d=>d.status==='up').length})</option>
           <option value="warn">Warning ({devs.filter(d=>d.status==='warn').length})</option>
           <option value="down">Offline ({devs.filter(d=>d.status==='down').length})</option>
+          <option value="unreachable">Unreachable ({devs.filter(d=>d.status==='unreachable').length})</option>
+          <option value="unknown">Unknown ({devs.filter(d=>d.status==='unknown').length})</option>
         </select>
       </div>
-      <div style={{ ...FI, borderRight: 'none' }}>
-        <div style={FL}><span>⚙</span> DEVICE TYPE</div>
-        <select suppressHydrationWarning style={FS} value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
+      <div style={FI}>
+        <label style={FL}>Device type</label>
+        <select suppressHydrationWarning className="form-select" style={FS} value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
           <option value="all">All Devices ({devs.length})</option>
           {deviceTypes.map(t => <option key={t} value={t}>{t} ({devs.filter(d=>d.type===t).length})</option>)}
         </select>

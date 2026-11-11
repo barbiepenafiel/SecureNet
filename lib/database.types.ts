@@ -1,4 +1,6 @@
-export type DeviceStatus = 'up' | 'warn' | 'down' | 'maint'
+// up = Online · down = Offline · unreachable = missed 1–2 checks ·
+// unknown = the agent can't see this device's network
+export type DeviceStatus = 'up' | 'warn' | 'down' | 'maint' | 'unreachable' | 'unknown'
 export type AlertSeverity = 'crit' | 'warn' | 'info'
 
 export interface Device {
@@ -17,6 +19,25 @@ export interface Device {
   snmp_port: number | null
   created_at: string
   updated_at: string
+  // Discovery (columns from supabase/migration_auto_discovery.sql)
+  mac?: string | null
+  hostname?: string | null
+  vendor?: string | null
+  source?: 'manual' | 'discovered'
+  subnet?: string | null
+  first_seen?: string | null
+  last_seen?: string | null
+  last_method?: string | null
+  room_id?: string | null      // floor plan room (supabase/migration_floor_rooms.sql)
+}
+
+export interface AgentStatus {
+  id: string
+  ip: string | null
+  subnet: string | null
+  interface: string | null
+  hosts_seen: number
+  last_seen: string
 }
 
 export interface Alert {
@@ -32,6 +53,13 @@ export interface Alert {
   resolved_by: string | null
   created_at: string
   updated_at: string
+  // Device details (columns from supabase/migration_alert_details.sql)
+  device_name?: string | null
+  device_ip?: string | null
+  device_mac?: string | null
+  location?: string | null
+  detection_method?: string | null
+  status?: 'online' | 'offline' | null
 }
 
 export interface AlertConfig {

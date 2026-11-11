@@ -27,8 +27,8 @@ function AddDeviceModal({ onClose }: { onClose: () => void }) {
   return (
     <Modal title="Add Device" onClose={onClose}
       footer={<>
-        <button className="btn" onClick={onClose}>Cancel</button>
-        <button className="btn btn-primary" onClick={save} disabled={saving || !form.name || !form.ip}>
+        <button suppressHydrationWarning className="btn" onClick={onClose}>Cancel</button>
+        <button suppressHydrationWarning className="btn btn-primary" onClick={save} disabled={saving || !form.name || !form.ip}>
           {saving ? 'Saving…' : 'Add Device'}
         </button>
       </>}
@@ -36,11 +36,11 @@ function AddDeviceModal({ onClose }: { onClose: () => void }) {
       <div className="form-row">
         <div className="form-group">
           <label className="form-label">Hostname</label>
-          <input className="form-input" placeholder="e.g. AP-A-05" value={form.name} onChange={set('name')} />
+          <input suppressHydrationWarning className="form-input" placeholder="e.g. AP-A-05" value={form.name} onChange={set('name')} />
         </div>
         <div className="form-group">
           <label className="form-label">IP Address</label>
-          <input className="form-input" placeholder="192.168.1.x" value={form.ip} onChange={set('ip')} />
+          <input suppressHydrationWarning className="form-input" placeholder="192.168.1.x" value={form.ip} onChange={set('ip')} />
         </div>
       </div>
       <div className="form-row">
@@ -61,7 +61,7 @@ function AddDeviceModal({ onClose }: { onClose: () => void }) {
       </div>
       <div className="form-group">
         <label className="form-label">SNMP Community</label>
-        <input className="form-input" placeholder="nw2026" value={form.snmp} onChange={set('snmp')} />
+        <input suppressHydrationWarning className="form-input" placeholder="nw2026" value={form.snmp} onChange={set('snmp')} />
       </div>
     </Modal>
   )
@@ -91,28 +91,28 @@ function MaintenanceModal({ onClose }: { onClose: () => void }) {
   return (
     <Modal title="New Maintenance Window" onClose={onClose}
       footer={<>
-        <button className="btn" onClick={onClose}>Cancel</button>
-        <button className="btn btn-primary" onClick={save} disabled={saving}>
+        <button suppressHydrationWarning className="btn" onClick={onClose}>Cancel</button>
+        <button suppressHydrationWarning className="btn btn-primary" onClick={save} disabled={saving}>
           {saving ? 'Saving…' : 'Save Window'}
         </button>
       </>}
     >
       <div className="form-group">
         <label className="form-label">Name</label>
-        <input className="form-input" placeholder="e.g. Patch night" value={form.name} onChange={set('name')} />
+        <input suppressHydrationWarning className="form-input" placeholder="e.g. Patch night" value={form.name} onChange={set('name')} />
       </div>
       <div className="form-group">
         <label className="form-label">Devices</label>
-        <input className="form-input" placeholder="SW-A1, SW-A2 or All" value={form.devices} onChange={set('devices')} />
+        <input suppressHydrationWarning className="form-input" placeholder="SW-A1, SW-A2 or All" value={form.devices} onChange={set('devices')} />
       </div>
       <div className="form-row">
         <div className="form-group">
           <label className="form-label">Start</label>
-          <input className="form-input" type="datetime-local" value={form.starts_at} onChange={set('starts_at')} />
+          <input suppressHydrationWarning className="form-input" type="datetime-local" value={form.starts_at} onChange={set('starts_at')} />
         </div>
         <div className="form-group">
           <label className="form-label">End</label>
-          <input className="form-input" type="datetime-local" value={form.ends_at} onChange={set('ends_at')} />
+          <input suppressHydrationWarning className="form-input" type="datetime-local" value={form.ends_at} onChange={set('ends_at')} />
         </div>
       </div>
       <div className="form-group">
@@ -123,7 +123,7 @@ function MaintenanceModal({ onClose }: { onClose: () => void }) {
       </div>
       <div className="form-group">
         <label className="form-label">Note</label>
-        <textarea className="form-textarea" placeholder="Reason for maintenance…" value={form.note}
+        <textarea suppressHydrationWarning className="form-textarea" placeholder="Reason for maintenance…" value={form.note}
           onChange={set('note')} />
       </div>
     </Modal>

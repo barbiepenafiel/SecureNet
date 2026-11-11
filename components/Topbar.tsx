@@ -35,8 +35,8 @@ export default function Topbar({ onMaintenance, onAddDevice }: Props) {
       <div className="topbar-actions">
         <div className="dot-pulse" />
         <span style={{ fontSize: 12, color: 'var(--text3)' }}>Live</span>
-        <button className="btn btn-sm" onClick={onMaintenance}>🔧 Maintenance</button>
-        <button className="btn btn-primary btn-sm" onClick={onAddDevice}>+ Add Device</button>
+        <button suppressHydrationWarning className="btn btn-sm" onClick={onMaintenance}>🔧 Maintenance</button>
+        <button suppressHydrationWarning className="btn btn-primary btn-sm" onClick={onAddDevice}>+ Add Device</button>
       </div>
     </div>
   )

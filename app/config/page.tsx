@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { supabase } from '@/lib/supabase'
 import type { ConfigBackup, Device } from '@/lib/database.types'
+import { usePolling } from '@/lib/usePolling'
 
 function lineDiff(oldText: string, newText: string) {
   const a   = oldText.split('\n').filter(l => l.trim())
@@ -66,6 +67,8 @@ export default function ConfigPage() {
       .subscribe()
     return () => { supabase.removeChannel(ch) }
   }, [load])
+  // Keep data current without a manual refresh
+  usePolling(load, 10_000)
 
   async function backupAll() {
     setBacking(true)
@@ -162,7 +165,7 @@ export default function ConfigPage() {
               ● Live{lastUp && ` · ${lastUp}`}
             </span>
             <div className="card-header-actions">
-              <button className="btn btn-primary btn-sm" onClick={backupAll} disabled={backing}>
+              <button suppressHydrationWarning className="btn btn-primary btn-sm" onClick={backupAll} disabled={backing}>
                 {backing ? '…Backing up' : '⟳ Backup All'}
               </button>
             </div>
@@ -193,7 +196,7 @@ export default function ConfigPage() {
                       </td>
                       <td>
                         <div className="tbl-actions">
-                          <button
+                          <button suppressHydrationWarning
                             className="btn btn-sm btn-primary"
                             onClick={() => backupOne(dev.id, dev.name)}
                             disabled={backingId === dev.id}
@@ -201,7 +204,7 @@ export default function ConfigPage() {
                             {backingId === dev.id ? '…' : 'Backup'}
                           </button>
                           {latest?.content && (
-                            <button className="btn btn-sm" onClick={() => {
+                            <button suppressHydrationWarning className="btn btn-sm" onClick={() => {
                               const blob = new Blob([latest.content!], { type: 'text/plain' })
                               const a = document.createElement('a')
                               a.href = URL.createObjectURL(blob)
@@ -210,7 +213,7 @@ export default function ConfigPage() {
                             }}>Download</button>
                           )}
                           {latest?.changed && latest?.content && (
-                            <button className="btn btn-sm" onClick={() => showDiff(latest)}>Diff</button>
+                            <button suppressHydrationWarning className="btn btn-sm" onClick={() => showDiff(latest)}>Diff</button>
                           )}
                         </div>
                       </td>

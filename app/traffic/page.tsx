@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { Chart, registerables } from 'chart.js'
 import { supabase } from '@/lib/supabase'
 import type { Client, TrafficSample } from '@/lib/database.types'
+import { usePolling } from '@/lib/usePolling'
 
 Chart.register(...registerables)
 
@@ -142,6 +143,8 @@ export default function TrafficPage() {
       .subscribe()
     return () => { supabase.removeChannel(ch) }
   }, [loadData])
+  // Keep data current without a manual refresh
+  usePolling(loadData, 10_000)
 
   const hasReal = samples.length > 0
 

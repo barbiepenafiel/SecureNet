@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
+import { requirePermission } from '@/lib/auth-server'
 
 function adminDb() {
   return createClient(
@@ -15,6 +16,8 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  const gate = await requirePermission('settings.manage')
+  if (gate instanceof Response) return gate
   const body = await req.json()
   const db = adminDb()
 

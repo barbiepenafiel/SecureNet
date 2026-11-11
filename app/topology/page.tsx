@@ -1,6 +1,9 @@
 import { createServerClient } from '@/lib/supabase'
 import type { Device } from '@/lib/database.types'
 import TopologyHub from '@/components/TopologyHub'
+import LiveRefresh from '@/components/LiveRefresh'
+
+const LIVE_TABLES = ['devices']
 
 export const dynamic = 'force-dynamic'
 
@@ -17,5 +20,10 @@ export default async function TopologyPage() {
     if (c.ap) clientCounts[c.ap] = (clientCounts[c.ap] ?? 0) + 1
   })
 
-  return <TopologyHub devs={devs} clientCounts={clientCounts} />
+  return (
+    <>
+      <LiveRefresh tables={LIVE_TABLES} />
+      <TopologyHub mode="topology" devs={devs} clientCounts={clientCounts} />
+    </>
+  )
 }

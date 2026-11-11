@@ -47,7 +47,7 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 11, color: 'rgba(255,255,255,.8)' }}>{now}</span>
-          <button onClick={onDismiss} style={{
+          <button suppressHydrationWarning onClick={onDismiss} style={{
             background: 'none', border: 'none', color: 'rgba(255,255,255,.85)',
             cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 0, fontWeight: 400,
           }}>×</button>

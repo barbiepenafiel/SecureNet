@@ -50,7 +50,7 @@ export default function DiscoveredKpi() {
       .subscribe()
 
     // Fallback poll every 15s
-    const poll = setInterval(load, 15_000)
+    const poll = setInterval(() => { if (document.visibilityState === "visible") load() }, 5_000)
 
     return () => {
       window.removeEventListener('nms:scan-complete', onScanComplete)

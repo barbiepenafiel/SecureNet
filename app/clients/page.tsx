@@ -134,7 +134,7 @@ export default function ClientsPage() {
     window.addEventListener('nms:scan-complete', onScan)
 
     // Auto-refresh every 60s to pick up latest ping results from monitor
-    const timer = setInterval(load, 60_000)
+    const timer = setInterval(() => { if (document.visibilityState === "visible") load() }, 5_000)
 
     // Real-time refresh when device SNMP data updates
     const ch = supabase.channel('clients-snmp')
@@ -197,7 +197,7 @@ export default function ClientsPage() {
             ● Live · auto-refresh 1 min{lastUp && ` · updated ${lastUp}`}
           </span>
           <div style={{ marginLeft: 'auto' }}>
-            <input
+            <input suppressHydrationWarning
               className="form-input"
               style={{ width: 190, fontSize: 12 }}
               placeholder="Search IP / MAC / hostname…"

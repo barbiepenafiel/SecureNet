@@ -53,9 +53,14 @@ export default function DeviceSourceChart() {
       const arpOnline  = arpScan.filter(h => h.responded).length
       const arpOffline = arpScan.filter(h => !h.responded).length
 
-      setCounts({ snmpOnline, snmpOffline, icmpOnline, icmpOffline, arpOnline, arpOffline })
+      const next = { snmpOnline, snmpOffline, icmpOnline, icmpOffline, arpOnline, arpOffline }
+      // Only redraw the chart when a number actually changed
+      setCounts(prev => JSON.stringify(prev) === JSON.stringify(next) ? prev : next)
     }
     load()
+    // Keep the chart current without a manual refresh
+    const poll = setInterval(() => { if (document.visibilityState === 'visible') load() }, 10_000)
+    return () => clearInterval(poll)
   }, [])
 
   useEffect(() => {

@@ -3,10 +3,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from '@/lib/supabase'
 
-const INTERVAL_MS    = 30 * 1000  // 30 seconds (demo mode)
+const INTERVAL_MS    = 30 * 1000  // scan / SNMP / report cycle
+const PING_MS        = 15 * 1000  // device online/offline check (ICMP → ARP → SNMP)
 const DEFAULT_SUBNET = '192.168.1'
 
-interface MonitorResult { name: string; ip: string; up: boolean; streak: number }
+interface MonitorResult { name: string; ip: string; up: boolean; streak: number; skipped?: boolean }
 interface ScanHost      { ip: string; hostname: string | null; scan_type: string }
 
 // ── Browser notification helper ──────────────────────────────────────────
@@ -44,31 +45,38 @@ export default function PingMonitor() {
   const [downCount, setDownCount] = useState(0)
   const [scanning,  setScanning]  = useState(false)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const pingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // ── Online/offline check every 15 s (the server creates the alerts) ──
+  async function runMonitor() {
+    try {
+      const res = await fetch('/api/monitor', { method: 'POST' })
+      if (!res.ok) return
+      const data = await res.json()
+      const results: MonitorResult[] = [
+        ...(data.managed    ?? []),
+        ...(data.discovered ?? []),
+      ]
+      // Count only confirmed outages (3 failed checks, on a reachable network)
+      const threshold = Number(data.threshold) || 1
+      setDownCount(results.filter(r => !r.up && !r.skipped && r.streak >= threshold).length)
+      setLastRun(new Date())
+    } catch { /* silent background task */ }
+  }
 
   async function runCycle() {
     setScanning(true)
     try {
       const subnet = localStorage.getItem('nms_scan_subnet') ?? DEFAULT_SUBNET
 
-      // ── 1. Run ping-monitor + full subnet scan in parallel ──
-      const [monitorRes, scanRes] = await Promise.allSettled([
-        fetch('/api/monitor', { method: 'POST' }),
+      // ── 1. Subnet scan ──
+      const [scanRes] = await Promise.allSettled([
         fetch('/api/scan', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ subnet }),
         }),
       ])
-
-      // ── 2. Process monitor results (device up/down) ──
-      if (monitorRes.status === 'fulfilled' && monitorRes.value.ok) {
-        const data = await monitorRes.value.json()
-        const results: MonitorResult[] = [
-          ...(data.managed    ?? []),
-          ...(data.discovered ?? []),
-        ]
-        setDownCount(results.filter(r => !r.up).length)
-      }
 
       // ── 3. Detect newly discovered hosts (dedupe by IP in localStorage) ──
       if (scanRes.status === 'fulfilled' && scanRes.value.ok) {
@@ -105,6 +113,7 @@ export default function PingMonitor() {
         .select('id, title, meta, severity')
         .eq('acked', false)
         .eq('suppressed', false)
+        .is('resolved_at', null)
         .in('severity', ['crit', 'warn'])
         .gte('created_at', sixMinAgo)
         .order('created_at', { ascending: false })
@@ -157,6 +166,8 @@ export default function PingMonitor() {
 
     // First cycle 15 s after mount
     const boot = setTimeout(() => {
+      runMonitor()
+      pingTimerRef.current = setInterval(runMonitor, PING_MS)
       runCycle()
       timerRef.current = setInterval(runCycle, INTERVAL_MS)
     }, 3_000)
@@ -164,6 +175,7 @@ export default function PingMonitor() {
     return () => {
       clearTimeout(boot)
       if (timerRef.current) clearInterval(timerRef.current)
+      if (pingTimerRef.current) clearInterval(pingTimerRef.current)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -183,8 +195,8 @@ export default function PingMonitor() {
   return (
     <div
       title={lastRun
-        ? `Auto-scan every 5 min · ${downCount} device(s) down · last: ${lastRun.toLocaleTimeString()}`
-        : 'Auto-scan + ping monitor starts in 15 s…'}
+        ? `Device check every 15 s (offline after 3 failed checks) · ${downCount} device(s) down · last: ${lastRun.toLocaleTimeString()}`
+        : 'Device monitor starting…'}
       style={{
         display: 'flex', alignItems: 'center', gap: 5,
         fontSize: 11, color: 'var(--text3)', userSelect: 'none', cursor: 'default',

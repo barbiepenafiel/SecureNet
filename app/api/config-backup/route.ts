@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
+import { requirePermission } from '@/lib/auth-server'
 import * as snmp from 'net-snmp'
 
 export const runtime = 'nodejs'
@@ -80,6 +81,8 @@ async function buildSnapshot(ip: string, community: string, deviceName: string, 
 }
 
 export async function POST(req: Request) {
+  const gate = await requirePermission('config.manage')
+  if (gate instanceof Response) return gate
   const db   = adminClient()
   const body = await req.json().catch(() => ({}))
 

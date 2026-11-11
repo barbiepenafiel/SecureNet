@@ -125,7 +125,7 @@ export default function AIInsightsButton() {
           }}>
             <span style={{ fontSize: 18 }}>🤖</span>
             <span style={{ fontWeight: 600, fontSize: 14 }}>AI Network Insights</span>
-            <button
+            <button suppressHydrationWarning
               onClick={() => setOpen(false)}
               style={{
                 marginLeft: 'auto', background: 'none', border: 'none',
@@ -185,7 +185,7 @@ export default function AIInsightsButton() {
             background: 'var(--surface2)',
             flexShrink: 0,
           }}>
-            <button
+            <button suppressHydrationWarning
               onClick={generate}
               disabled={loading}
               style={{

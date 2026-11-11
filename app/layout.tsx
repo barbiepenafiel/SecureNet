@@ -1,11 +1,7 @@
 import type { Metadata } from 'next'
 import './globals.css'
-import Sidebar from '@/components/Sidebar'
-import TopbarShell from '@/components/TopbarShell'
-import ShellModals from '@/components/ShellModals'
-import AIInsightsButton from '@/components/AIInsightsButton'
-import ToastNotifications from '@/components/ToastNotifications'
-import PingMonitor from '@/components/PingMonitor'
+import AuthProvider from '@/components/AuthProvider'
+import AppShell from '@/components/AppShell'
 
 export const metadata: Metadata = {
   title: 'Securenet — Network Monitoring',
@@ -22,17 +18,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
       <body>
-        <div className="app">
-          <Sidebar />
-          <div className="main">
-            <TopbarShell />
-            <div className="content">{children}</div>
-          </div>
-        </div>
-        <PingMonitor />
-        <ShellModals />
-        <AIInsightsButton />
-        <ToastNotifications />
+        <AuthProvider>
+          <AppShell>{children}</AppShell>
+        </AuthProvider>
       </body>
     </html>
   )

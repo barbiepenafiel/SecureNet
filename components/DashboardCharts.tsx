@@ -1,14 +1,10 @@
 'use client'
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Chart, registerables } from 'chart.js'
+import { supabase } from '@/lib/supabase'
 
 Chart.register(...registerables)
-
-function hrs24() { return Array.from({ length: 24 }, (_, i) => `${i}:00`) }
-// Deterministic 24h traffic (Mbps) — business-hours curve, no Math.random()
-const INBOUND  = [120,110,105,100,108,130,185,295,485,565,595,615,625,595,585,605,560,490,380,278,208,178,158,138]
-const OUTBOUND = [ 60, 54, 52, 50, 55, 65, 92,148,243,283,298,308,312,297,292,302,282,247,192,138,105, 90, 80, 70]
 
 const BASE = {
   responsive: true,
@@ -23,29 +19,104 @@ const BASE = {
   },
 } as const
 
-export function TrafficChart() {
+// ── Network Latency — Last 24h ────────────────────────────────────────────────
+// Real data from latency_samples (written by the agent once a minute), shown
+// in 15-minute steps:
+//   Online  — average ping (ms) of devices that were Online
+//   Warning — average ping (ms) of devices in Warning (high latency)
+//   Offline — number of devices that were Offline (they don't answer ping,
+//             so they have no latency) — right-hand scale
+type LatencyRow = { bucket: string; online_ms: number | null; warning_ms: number | null; offline_devices: number }
+
+const BUCKET_MS = 15 * 60 * 1000
+const BUCKETS   = 96   // 24 h
+
+export function LatencyChart() {
   const ref = useRef<HTMLCanvasElement>(null)
   const chart = useRef<Chart | null>(null)
+  const [note, setNote] = useState<string | null>('Loading latency…')
 
   useEffect(() => {
     if (!ref.current) return
     chart.current = new Chart(ref.current, {
-      type: 'line',
       data: {
-        labels: hrs24(),
+        labels: [],
         datasets: [
-          { label: 'Inbound',  data: INBOUND,  borderColor: '#2f81f7', backgroundColor: 'rgba(47,129,247,.1)', fill: true, tension: .4, pointRadius: 0 },
-          { label: 'Outbound', data: OUTBOUND, borderColor: '#3fb950', backgroundColor: 'rgba(63,185,80,.07)',  fill: true, tension: .4, pointRadius: 0 },
+          { type: 'line', label: 'Online',  data: [], yAxisID: 'y',  borderColor: '#3fb950', backgroundColor: 'rgba(63,185,80,.10)', fill: true, tension: .35, pointRadius: 0, pointHoverRadius: 4, spanGaps: false },
+          { type: 'line', label: 'Warning', data: [], yAxisID: 'y',  borderColor: '#d29922', backgroundColor: 'rgba(210,153,34,.10)', fill: true, tension: .35, pointRadius: 0, pointHoverRadius: 4, spanGaps: false },
+          { type: 'bar',  label: 'Offline', data: [], yAxisID: 'y1', backgroundColor: 'rgba(248,81,73,.55)', borderColor: '#f85149', borderWidth: 0, barPercentage: 1, categoryPercentage: .9 },
         ],
       },
-      options: { ...BASE, plugins: { ...BASE.plugins, legend: { display: true, labels: { color: '#8b949e', font: { size: 11 } } } } },
+      options: {
+        ...BASE,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          ...BASE.plugins,
+          legend: { display: true, labels: { color: '#8b949e', font: { size: 11 } } },
+          tooltip: {
+            ...BASE.plugins.tooltip,
+            callbacks: {
+              label: ctx => {
+                const v = ctx.parsed.y
+                if (v == null) return `${ctx.dataset.label}: —`
+                return ctx.dataset.label === 'Offline'
+                  ? `Offline: ${v} device${v === 1 ? '' : 's'}`
+                  : `${ctx.dataset.label}: ${v} ms average`
+              },
+            },
+          },
+        },
+        scales: {
+          x:  { ...BASE.scales.x, ticks: { ...BASE.scales.x.ticks, maxTicksLimit: 12, autoSkip: true, maxRotation: 0 } },
+          y:  { ...BASE.scales.y, beginAtZero: true, title: { display: true, text: 'Latency (ms)', color: '#6e7681', font: { size: 11 } } },
+          y1: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false },
+                ticks: { color: '#f85149', font: { size: 11 }, precision: 0 },
+                title: { display: true, text: 'Offline devices', color: '#f85149', font: { size: 11 } } },
+        },
+      },
     })
-    return () => chart.current?.destroy()
+
+    async function load() {
+      const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+      const { data, error } = await supabase.from('latency_15min').select('*').gte('bucket', since)
+      if (error) { setNote('Latency history isn’t set up yet — run supabase/migration_latency_history.sql'); return }
+
+      // 96 fixed 15-minute slots ending now; empty slots stay as gaps
+      const byBucket = new Map((data as LatencyRow[]).map(r => [new Date(r.bucket).getTime(), r]))
+      const end = Math.floor(Date.now() / BUCKET_MS) * BUCKET_MS
+      const labels: string[] = [], online: (number | null)[] = [], warning: (number | null)[] = [], offline: (number | null)[] = []
+      for (let i = BUCKETS - 1; i >= 0; i--) {
+        const t = end - i * BUCKET_MS
+        const r = byBucket.get(t)
+        labels.push(new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }))
+        online.push(r?.online_ms ?? null)
+        warning.push(r?.warning_ms ?? null)
+        offline.push(r ? Number(r.offline_devices) || null : null)
+      }
+      const c = chart.current
+      if (!c) return
+      c.data.labels = labels
+      c.data.datasets[0].data = online
+      c.data.datasets[1].data = warning
+      c.data.datasets[2].data = offline
+      c.update('none')
+      setNote(data.length ? null : 'Collecting latency… the first points appear about a minute after the agent starts')
+    }
+
+    load()
+    const t = setInterval(() => { if (document.visibilityState === 'visible') load() }, 30_000)
+    return () => { clearInterval(t); chart.current?.destroy(); chart.current = null }
   }, [])
 
   return (
     <div style={{ position: 'relative', height: 200 }}>
       <canvas ref={ref} />
+      {note && (
+        <div style={{
+          position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 12, color: 'var(--text3)', textAlign: 'center', padding: 16, pointerEvents: 'none',
+        }}>{note}</div>
+      )}
     </div>
   )
 }

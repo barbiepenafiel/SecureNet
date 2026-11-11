@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { supabase } from '@/lib/supabase'
 import type { Device, DeviceStatus, StatusEvent } from '@/lib/database.types'
+import { usePolling } from '@/lib/usePolling'
 
 // SLA targets by device type
 const SLA_TARGET: Record<string, number> = {
@@ -151,6 +152,8 @@ export default function SlaPage() {
       .subscribe()
     return () => { supabase.removeChannel(ch) }
   }, [load])
+  // Keep data current without a manual refresh
+  usePolling(load)
 
   if (loading) return <div style={{ padding: 40, textAlign: 'center', color: 'var(--text3)' }}>Computing SLA from status events…</div>
 

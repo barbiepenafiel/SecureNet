@@ -1,11 +1,16 @@
 import { createClient } from '@supabase/supabase-js'
+import { createBrowserClient } from '@supabase/ssr'
 
 const url  = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const key  = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!
 
-// Browser-safe singleton (untyped client — tables cast at call site)
+// Browser client. Stores the login session in cookies so the
+// middleware and API routes can see who is signed in.
+// (untyped client — tables cast at call site)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export const supabase = createClient<any>(url, key)
+export const supabase = typeof window === 'undefined'
+  ? createClient<any>(url, key, { auth: { persistSession: false } })
+  : createBrowserClient<any>(url, key)
 
 // Server-side helper — uses service role key to bypass RLS
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

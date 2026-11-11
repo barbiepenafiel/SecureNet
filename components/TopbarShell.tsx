@@ -2,6 +2,7 @@
 
 import { usePathname } from 'next/navigation'
 import PingMonitor from './PingMonitor'
+import { useAuth } from './AuthProvider'
 
 const PAGE_META: Record<string, [string, string]> = {
   '/':          ['Dashboard',    'Overview'],
@@ -25,6 +26,7 @@ function openMaintenance() { (window as unknown as Record<string, () => void>)._
 export default function TopbarShell() {
   const path = usePathname()
   const [title, sub] = PAGE_META[path] ?? ['Securenet', '']
+  const { can } = useAuth()
 
   return (
     <div className="topbar" suppressHydrationWarning>
@@ -39,8 +41,8 @@ export default function TopbarShell() {
         <div style={{ width: 1, height: 16, background: 'var(--border)', margin: '0 4px' }} />
         <div className="dot-pulse" />
         <span style={{ fontSize: 12, color: 'var(--text3)' }}>Live</span>
-        <button className="btn btn-sm" onClick={openMaintenance} suppressHydrationWarning>🔧 Maintenance</button>
-        <button className="btn btn-primary btn-sm" onClick={openAddDevice} suppressHydrationWarning>+ Add Device</button>
+        {can('maintenance.manage') && <button className="btn btn-sm" onClick={openMaintenance} suppressHydrationWarning>🔧 Maintenance</button>}
+        {can('devices.manage') && <button className="btn btn-primary btn-sm" onClick={openAddDevice} suppressHydrationWarning>+ Add Device</button>}
       </div>
     </div>
   )

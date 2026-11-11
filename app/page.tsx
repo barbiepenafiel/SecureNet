@@ -1,10 +1,13 @@
 import { createServerClient } from '@/lib/supabase'
-import { TrafficChart, DevicePieChart } from '@/components/DashboardCharts'
+import { LatencyChart, DevicePieChart } from '@/components/DashboardCharts'
 import DeviceSourceChart from '@/components/DeviceSourceChart'
 import NetworkScanCard from '@/components/NetworkScanCard'
 import RecentAlertsCard from '@/components/RecentAlertsCard'
 import AlertsKpi from '@/components/AlertsKpi'
 import DiscoveredKpi from '@/components/DiscoveredKpi'
+import LiveRefresh from '@/components/LiveRefresh'
+
+const LIVE_TABLES = ['devices', 'alerts']
 import type { Device, SlaRecord, Client } from '@/lib/database.types'
 
 function statusChip(s: string) {
@@ -75,6 +78,9 @@ export default async function DashboardPage() {
 
   return (
     <>
+      {/* Re-render when devices/alerts change — no manual refresh needed */}
+      <LiveRefresh tables={LIVE_TABLES} />
+
       {/* Hero banner */}
       <div className="hero-banner">
         <div className="hero-label">Network Infrastructure · Campus Devices</div>
@@ -123,8 +129,11 @@ export default async function DashboardPage() {
         {/* Left column: Traffic chart + Device Health + SLA */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div className="card">
-            <div className="card-header">Network Traffic — Last 24h</div>
-            <div className="card-body" style={{ padding: '12px 16px 12px' }}><TrafficChart /></div>
+            <div className="card-header">
+              Network Latency — Last 24h
+              <span style={{ marginLeft: 8, fontWeight: 400, fontSize: 11, color: 'var(--text3)' }}>average ping by device status · 15-min steps</span>
+            </div>
+            <div className="card-body" style={{ padding: '12px 16px 12px' }}><LatencyChart /></div>
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
@@ -167,7 +176,12 @@ export default async function DashboardPage() {
           </div>
         </div>
 
-        <RecentAlertsCard />
+        {/* Matches the left column's height (no empty space); its list scrolls inside */}
+        <div style={{ position: 'relative', minHeight: 360 }}>
+          <div style={{ position: 'absolute', inset: 0 }}>
+            <RecentAlertsCard />
+          </div>
+        </div>
       </div>
 
       {/* Network Discovery */}

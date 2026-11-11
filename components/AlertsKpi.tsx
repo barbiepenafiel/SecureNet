@@ -8,11 +8,14 @@ export default function AlertsKpi() {
   const [alerts, setAlerts] = useState<Alert[]>([])
 
   async function load() {
+    const midnight = new Date()
+    midnight.setHours(0, 0, 0, 0)   // local midnight
     const { data } = await supabase
       .from('alerts')
-      .select('id, severity, acked, suppressed')
+      .select('id, severity, acked, suppressed, resolved_at')
       .eq('suppressed', false)
-    setAlerts(data ?? [])
+      .gte('created_at', midnight.toISOString())
+    setAlerts((data ?? []) as Alert[])
   }
 
   useEffect(() => {
@@ -21,20 +24,23 @@ export default function AlertsKpi() {
       .channel('kpi-alerts-rt')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'alerts' }, load)
       .subscribe()
-    return () => { supabase.removeChannel(ch) }
+    // Backup refresh every 5 s in case realtime isn't enabled for alerts
+    const poll = setInterval(() => { if (document.visibilityState === 'visible') load() }, 5_000)
+    return () => { supabase.removeChannel(ch); clearInterval(poll) }
   }, [])
 
-  const active = alerts.filter(a => !a.acked).length
-  const crit   = alerts.filter(a => a.severity === 'crit' && !a.acked).length
-  const warn   = alerts.filter(a => a.severity === 'warn' && !a.acked).length
+  const today   = alerts.length
+  const offline = alerts.filter(a => a.severity === 'crit').length
+  const online  = alerts.filter(a => a.severity === 'info').length
+  const open    = alerts.filter(a => a.severity !== 'info' && !a.resolved_at).length
 
   return (
     <div className="kpi kpi-warn">
       <div className="kpi-inner">
         <div>
           <div className="kpi-label">Alerts Today</div>
-          <div className="kpi-value">{active}</div>
-          <div className="kpi-sub">{crit} critical · {warn} warning</div>
+          <div className="kpi-value">{today}</div>
+          <div className="kpi-sub">{offline} offline · {online} back online · {open} open</div>
         </div>
         <div className="kpi-icon kpi-icon-warn">🔔</div>
       </div>

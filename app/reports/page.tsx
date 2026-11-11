@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { supabase } from '@/lib/supabase'
 import type { Device, Alert, SlaRecord } from '@/lib/database.types'
+import { usePolling } from '@/lib/usePolling'
 import {
   LatencyTrendChart, AlertBreakdownChart,
   IncidentFrequencyChart, PeakFailureHoursChart,
@@ -114,6 +115,8 @@ export default function ReportsPage() {
   }, [])
 
   useEffect(() => { load() }, [load])
+  // Keep data current without a manual refresh
+  usePolling(load, 15_000)
 
   // ── Period-filtered alerts ───────────────────────────────────
   const cutoff = useMemo(() => new Date(Date.now() - PERIOD_MS[period]), [period])
@@ -383,7 +386,7 @@ export default function ReportsPage() {
           <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,.5)', letterSpacing: '.08em', textTransform: 'uppercase', marginBottom: 8, textAlign: 'right' }}>View Period</div>
           <div style={{ display: 'flex', gap: 4 }}>
             {(['24h','7d','30d'] as Period[]).map(p => (
-              <button key={p} onClick={() => setPeriod(p)} style={{
+              <button suppressHydrationWarning key={p} onClick={() => setPeriod(p)} style={{
                 padding: '6px 14px', borderRadius: 8, border: '1px solid rgba(255,255,255,.2)',
                 background: period===p ? 'rgba(255,255,255,.2)' : 'rgba(255,255,255,.06)',
                 color: period===p ? '#fff' : 'rgba(255,255,255,.65)',
@@ -497,7 +500,7 @@ export default function ReportsPage() {
           Device Performance Summary
           <span style={{ fontSize: 11, color: 'var(--text3)', fontWeight: 400 }}>Sorted by uptime (worst first)</span>
           <div className="card-header-actions">
-            <button className="btn btn-sm" onClick={() => exportCSV(perfRows, period)}>↓ Export CSV</button>
+            <button suppressHydrationWarning className="btn btn-sm" onClick={() => exportCSV(perfRows, period)}>↓ Export CSV</button>
           </div>
         </div>
         <div style={{ overflowX: 'auto' }}>
@@ -541,7 +544,7 @@ export default function ReportsPage() {
         </div>
         {perfRows.length > 10 && (
           <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', textAlign: 'center' }}>
-            <button className="btn btn-sm" onClick={() => setShowAll(v => !v)}>
+            <button suppressHydrationWarning className="btn btn-sm" onClick={() => setShowAll(v => !v)}>
               {showAll ? '↑ Show Less' : `↓ Show All Devices (${perfRows.length - 10} more)`}
             </button>
           </div>
@@ -593,7 +596,7 @@ function ReportSnapshotsPanel({ generating, genMsg, onGenerate }: { generating: 
           {genMsg && (
             <span style={{ fontSize: 12, color: genMsg.startsWith('✓') ? 'var(--ok)' : 'var(--crit)', marginRight: 8 }}>{genMsg}</span>
           )}
-          <button className="btn btn-sm btn-primary" onClick={onGenerate} disabled={generating}>
+          <button suppressHydrationWarning className="btn btn-sm btn-primary" onClick={onGenerate} disabled={generating}>
             {generating ? 'Generating…' : '+ Generate Now'}
           </button>
         </div>
