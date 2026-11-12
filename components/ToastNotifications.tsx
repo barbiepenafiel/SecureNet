@@ -88,7 +88,7 @@ export default function ToastNotifications() {
 
   const push = useCallback((t: Omit<Toast, 'id'>) => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
-    setToasts(prev => [...prev.slice(-4), { ...t, id }])   // max 5 toasts visible
+    setToasts(prev => [...prev.slice(-2), { ...t, id }])   // max 3 toasts visible (oldest drops off)
     setTimeout(() => {
       setToasts(prev => prev.filter(x => x.id !== id))
     }, 6000)

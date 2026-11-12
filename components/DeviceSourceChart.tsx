@@ -20,22 +20,27 @@ export default function DeviceSourceChart() {
   useEffect(() => {
     async function load() {
       const [{ data: devices }, scanRes] = await Promise.all([
-        supabase.from('devices').select('ip, status, cpu, mem, snmp_community'),
+        supabase.from('devices').select('ip, status, cpu, mem, uptime, last_method'),
         fetch('/api/scan').then(r => r.ok ? r.json() : { results: [] }).catch(() => ({ results: [] })),
       ])
 
-      const devList = (devices ?? []) as { ip: string; status: string; cpu: number; mem: number; snmp_community: string | null }[]
+      const devList = (devices ?? []) as { ip: string; status: string; cpu: number; mem: number; uptime: string | null; last_method: string | null }[]
       const managedIps = new Set(devList.map(d => d.ip))
+      const isOnline = (s: string) => s === 'up' || s === 'warn'
 
-      // A device is truly SNMP only if it has real SNMP data (cpu/mem polled) or snmp_community set
-      const snmpDevs = devList.filter(d => d.snmp_community || d.cpu > 0 || d.mem > 0)
+      // SNMP = the device actually returned SNMP data (CPU, memory or uptime).
+      // A community alone doesn't count — every discovered device gets a default one.
+      const snmpDevs = devList.filter(d => d.cpu > 0 || d.mem > 0 || (!!d.uptime && d.uptime !== '—'))
       const snmpIps  = new Set(snmpDevs.map(d => d.ip))
 
-      // Managed devices without SNMP data = were added from ICMP/ARP discovery
-      const icmpManaged = devList.filter(d => !snmpIps.has(d.ip))
+      // The rest by how the monitor last reached them: ARP, otherwise ICMP
+      const rest        = devList.filter(d => !snmpIps.has(d.ip))
+      const arpManaged  = rest.filter(d => d.last_method === 'ARP')
+      const icmpManaged = rest.filter(d => d.last_method !== 'ARP')
 
-      const snmpOnline  = snmpDevs.filter(d => d.status === 'up' || d.status === 'warn').length
-      const snmpOffline = snmpDevs.filter(d => d.status === 'down').length
+      // Offline = not online right now (offline, unreachable or unknown)
+      const snmpOnline  = snmpDevs.filter(d => isOnline(d.status)).length
+      const snmpOffline = snmpDevs.filter(d => !isOnline(d.status)).length
 
       // Discovered from scan — not in managed devices table
       const scanResults = (scanRes.results ?? []) as { ip: string; scan_type: string; responded: boolean }[]
@@ -43,15 +48,16 @@ export default function DeviceSourceChart() {
 
       // ICMP = managed-without-SNMP + unmanaged icmp/both scans
       const icmpScan   = unmanaged.filter(h => h.scan_type === 'icmp' || h.scan_type === 'both')
-      const icmpOnline  = icmpManaged.filter(d => d.status === 'up' || d.status === 'warn').length
+      const icmpOnline  = icmpManaged.filter(d => isOnline(d.status)).length
                         + icmpScan.filter(h => h.responded).length
-      const icmpOffline = icmpManaged.filter(d => d.status === 'down').length
+      const icmpOffline = icmpManaged.filter(d => !isOnline(d.status)).length
                         + icmpScan.filter(h => !h.responded).length
 
-      // ARP = unmanaged arp-only scans
+      // ARP = devices last reached by ARP + unmanaged ARP-only scans
+      // (an ARP-only host is alive even though it didn't answer ping)
       const arpScan    = unmanaged.filter(h => h.scan_type === 'arp')
-      const arpOnline  = arpScan.filter(h => h.responded).length
-      const arpOffline = arpScan.filter(h => !h.responded).length
+      const arpOnline  = arpManaged.filter(d => isOnline(d.status)).length + arpScan.length
+      const arpOffline = arpManaged.filter(d => !isOnline(d.status)).length
 
       const next = { snmpOnline, snmpOffline, icmpOnline, icmpOffline, arpOnline, arpOffline }
       // Only redraw the chart when a number actually changed
@@ -78,7 +84,8 @@ export default function DeviceSourceChart() {
         datasets: [{
           data: hasAny ? data : [1],
           backgroundColor: hasAny
-            ? ['#3fb950', '#f85149', '#2f81f7', '#f0883e', '#a371f7', '#d29922']
+            // SNMP green/red · ICMP blue (light = offline) · ARP orange (light = offline)
+            ? ['#3fb950', '#f85149', '#2f81f7', '#a5c8fb', '#f0883e', '#f9c9a1']
             : ['#2f81f720'],
           borderWidth: 2,
           borderColor: 'transparent',

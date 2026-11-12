@@ -11,8 +11,8 @@ const LIVE_TABLES = ['devices', 'alerts']
 import type { Device, SlaRecord, Client } from '@/lib/database.types'
 
 function statusChip(s: string) {
-  const cls: Record<string, string>   = { up: 'chip-ok', warn: 'chip-warn', down: 'chip-crit', maint: 'chip-maint' }
-  const label: Record<string, string> = { up: 'Online', warn: 'Warning', down: 'Offline', maint: 'Maintenance' }
+  const cls: Record<string, string>   = { up: 'chip-ok', warn: 'chip-warn', down: 'chip-crit', maint: 'chip-maint', unreachable: 'chip-off', unknown: 'chip-off' }
+  const label: Record<string, string> = { up: 'Online', warn: 'Warning', down: 'Offline', maint: 'Maintenance', unreachable: 'Unreachable', unknown: 'Unknown' }
   return <span className={`chip ${cls[s] ?? 'chip-off'}`}>{label[s] ?? s}</span>
 }
 
@@ -55,6 +55,15 @@ export default async function DashboardPage() {
     acc[d.location] = (acc[d.location] ?? 0) + 1; return acc
   }, {})
   const worstBldg = Object.entries(downBldgGroups).sort((a, b) => b[1] - a[1])[0]
+
+  // Device Status table: devices that answered SNMP first, then ones added
+  // by hand (Add Device), then the most recently discovered
+  const answeredSnmp = (d: Device) => d.cpu > 0 || d.mem > 0 || (!!d.uptime && d.uptime !== '—')
+  const isManual     = (d: Device) => (d as Device & { source?: string | null }).source !== 'discovered'
+  const rank         = (d: Device) => answeredSnmp(d) ? 0 : isManual(d) ? 1 : 2
+  const statusRows   = [...devs]
+    .sort((a, b) => rank(a) - rank(b) || (b.created_at ?? '').localeCompare(a.created_at ?? ''))
+    .slice(0, 10)
 
   const up   = devs.filter(d => d.status === 'up').length
   const warn = devs.filter(d => d.status === 'warn').length
@@ -203,15 +212,19 @@ export default async function DashboardPage() {
               <tr><th>Device Name</th><th>Type</th><th>IP Address</th><th>Location</th><th>Status</th><th>CPU %</th><th>Uptime</th></tr>
             </thead>
             <tbody>
-              {devs.slice(0, 8).map(d => (
+              {statusRows.map(d => (
                 <tr key={d.id}>
-                  <td><strong>{d.name}</strong></td>
+                  <td>
+                    <strong>{d.name}</strong>
+                    {answeredSnmp(d) && <span className="chip chip-info" style={{ marginLeft: 8 }}>SNMP</span>}
+                  </td>
                   <td><span className="tag">{d.type}</span></td>
                   <td className="mono">{d.ip}</td>
                   <td>{d.location}</td>
                   <td>{statusChip(d.status)}</td>
                   <td style={{ color: d.cpu >= 90 ? 'var(--crit)' : d.cpu >= 75 ? 'var(--warn)' : 'var(--ok)', fontWeight: 500 }}>
-                    {d.cpu ? `${d.cpu}%` : '—'}
+                    {/* 0 % is a real reading for SNMP devices; others have no CPU data */}
+                    {d.cpu || answeredSnmp(d) ? `${d.cpu}%` : '—'}
                   </td>
                   <td className="mono" style={{ fontSize: 12 }}>{d.uptime}</td>
                 </tr>

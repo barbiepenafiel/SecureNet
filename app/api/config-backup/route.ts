@@ -1,8 +1,10 @@
 import { createClient } from '@supabase/supabase-js'
 import { requirePermission } from '@/lib/auth-server'
 import * as snmp from 'net-snmp'
+import { agentOnline, runAgentJob } from '@/lib/agent-jobs'
 
 export const runtime = 'nodejs'
+export const maxDuration = 60   // waits for the campus agent's answer
 
 const OID_SYS_DESCR  = '1.3.6.1.2.1.1.1.0'
 const OID_SYS_NAME   = '1.3.6.1.2.1.1.5.0'
@@ -93,6 +95,20 @@ export async function POST(req: Request) {
 
   if (!devices?.length) return Response.json({ backed_up: 0, results: [] })
 
+  // The SNMP reads run on the campus agent when it is reporting (the hosted
+  // dashboard cannot reach the devices). A local server still reads directly
+  // when no agent is running.
+  let fromAgent: Record<string, string | null> | null = null
+  if (await agentOnline(db)) {
+    const job = await runAgentJob<{ snapshots: Record<string, string | null> }>(db, 'config_snapshot', {
+      devices: devices.map(d => ({ id: d.id, ip: d.ip, community: d.snmp_community ?? 'public', port: d.snmp_port ?? 161, name: d.name, type: d.type })),
+    }, { timeoutMs: 50_000, requestedBy: gate.email })
+    if (job.ok) fromAgent = job.result.snapshots
+    else if (!(job.status === 501 && !process.env.VERCEL)) return Response.json({ error: job.error }, { status: job.status })
+  } else if (process.env.VERCEL) {
+    return Response.json({ error: 'The monitoring agent is offline, so devices cannot be read right now. Turn on the computer that runs the SecureNet agent and try again.' }, { status: 503 })
+  }
+
   const now     = new Date().toISOString()
   const results = []
 
@@ -102,7 +118,9 @@ export async function POST(req: Request) {
     // Try to build SNMP snapshot; fall back to minimal text if no SNMP
     let content: string
     try {
-      content = await buildSnapshot(dev.ip, community, dev.name, dev.type)
+      const remote = fromAgent ? fromAgent[dev.id] : undefined
+      if (fromAgent && !remote) throw new Error('no snapshot from agent')
+      content = remote ?? await buildSnapshot(dev.ip, community, dev.name, dev.type)
     } catch {
       content = [
         `! Snapshot: ${dev.name} (${dev.type})`,

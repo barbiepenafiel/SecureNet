@@ -71,6 +71,7 @@ interface RoundResult {
   discovered: CheckResult[]
   checkedAt: string
   agent?: boolean   // true when the local agent is doing the monitoring
+  agentOnline?: boolean   // false = the agent stopped reporting (statuses may be out of date)
 }
 
 function adminClient() {
@@ -232,7 +233,12 @@ async function runRound(): Promise<RoundResult> {
   const db  = adminClient()
   const now = new Date().toISOString()
 
-  if (await agentIsReporting(db)) {
+  // A hosted (Vercel) server is not on the campus LAN: every ping from it
+  // would fail and devices would be marked offline with false alerts. There
+  // it only ever reports what the agent stored, and says whether the agent
+  // is still reporting.
+  const agentOnline = await agentIsReporting(db)
+  if (agentOnline || process.env.VERCEL) {
     // Report the agent's view instead of checking (and alerting) twice
     const { data: devs } = await db.from('devices').select('name, ip, status, last_method').neq('status', 'maint')
     return {
@@ -248,6 +254,7 @@ async function runRound(): Promise<RoundResult> {
       discovered: [],
       checkedAt:  now,
       agent:      true,
+      agentOnline,
     }
   }
 

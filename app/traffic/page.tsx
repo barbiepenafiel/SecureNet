@@ -5,6 +5,8 @@ import { Chart, registerables } from 'chart.js'
 import { supabase } from '@/lib/supabase'
 import type { Client, TrafficSample } from '@/lib/database.types'
 import { usePolling } from '@/lib/usePolling'
+import MikrotikRouterCard from '@/components/MikrotikRouterCard'
+import SnmpTrafficGraphs from '@/components/SnmpTrafficGraphs'
 
 Chart.register(...registerables)
 
@@ -173,6 +175,11 @@ export default function TrafficPage() {
 
   return (
     <>
+      {/* MikroTik router (live SNMP from the local agent) */}
+      <div style={{ marginBottom: 14 }}>
+        <MikrotikRouterCard />
+      </div>
+
       {/* KPI row */}
       {hasReal && (
         <div style={{ display: 'flex', gap: 12, marginBottom: 14 }}>
@@ -268,6 +275,9 @@ export default function TrafficPage() {
             : <IfaceChart labels={chartLabels} inData={chartIn} outData={chartOut} unit={chartUnit} />}
         </div>
       </div>
+
+      {/* Traffic graph per SNMP device */}
+      <SnmpTrafficGraphs />
     </>
   )
 }

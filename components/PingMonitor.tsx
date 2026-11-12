@@ -44,6 +44,7 @@ export default function PingMonitor() {
   const [lastRun,   setLastRun]   = useState<Date | null>(null)
   const [downCount, setDownCount] = useState(0)
   const [scanning,  setScanning]  = useState(false)
+  const [agentOffline, setAgentOffline] = useState(false)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const pingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -60,6 +61,8 @@ export default function PingMonitor() {
       // Count only confirmed outages (3 failed checks, on a reachable network)
       const threshold = Number(data.threshold) || 1
       setDownCount(results.filter(r => !r.up && !r.skipped && r.streak >= threshold).length)
+      // Hosted dashboard: the campus agent does the checking — say so when it stops reporting
+      setAgentOffline(data.agentOnline === false)
       setLastRun(new Date())
     } catch { /* silent background task */ }
   }
@@ -180,13 +183,15 @@ export default function PingMonitor() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const dotColor = scanning
+  const dotColor = agentOffline ? 'var(--crit)'
+    : scanning
     ? 'var(--info)'
     : downCount > 0 ? 'var(--crit)'
     : lastRun     ? 'var(--ok)'
     : 'var(--text3)'
 
-  const label = scanning
+  const label = agentOffline ? 'Agent offline — data not updating'
+    : scanning
     ? 'Scanning…'
     : downCount > 0 ? `${downCount} down`
     : lastRun       ? `Checked ${lastRun.toLocaleTimeString()}`
@@ -194,7 +199,9 @@ export default function PingMonitor() {
 
   return (
     <div
-      title={lastRun
+      title={agentOffline
+        ? 'The campus monitoring agent has not reported for over a minute. Device statuses are the last ones it sent. Monitoring resumes when the computer running the SecureNet agent is on and connected to the campus network.'
+        : lastRun
         ? `Device check every 15 s (offline after 3 failed checks) · ${downCount} device(s) down · last: ${lastRun.toLocaleTimeString()}`
         : 'Device monitor starting…'}
       style={{
@@ -208,7 +215,7 @@ export default function PingMonitor() {
         animation: scanning ? 'pulse 1s ease-in-out infinite' : 'none',
         boxShadow: downCount > 0 ? '0 0 0 2px rgba(248,81,73,.3)' : 'none',
       }} />
-      <span style={{ color: downCount > 0 ? 'var(--crit)' : 'inherit', fontWeight: downCount > 0 ? 600 : 400 }}>
+      <span style={{ color: agentOffline || downCount > 0 ? 'var(--crit)' : 'inherit', fontWeight: agentOffline || downCount > 0 ? 600 : 400 }}>
         {label}
       </span>
     </div>

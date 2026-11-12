@@ -27,6 +27,10 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env'), override: f
 
 const snmp = require('net-snmp')
 const { createClient } = require('@supabase/supabase-js')
+const mikrotik = require('./mikrotik')   // MikroTik RouterOS SNMP collector
+const generic  = require('./snmp-generic') // SNMP poll for every other SNMP device
+const jobs     = require('./jobs')       // LAN requests from the (hosted) dashboard
+const standby  = require('./standby')    // only one agent monitors at a time
 
 const execAsync = promisify(exec)
 
@@ -704,49 +708,76 @@ async function reconcileDevices(net, icmpMap, neighbors, extraLive = []) {
 }
 
 async function heartbeat(net, hostsSeen) {
-  await supabase.from('agent_status').upsert({
+  const row = {
     id: os.hostname(), ip: net?.selfIp ?? null, subnet: net?.cidr ?? null,
     interface: net?.ifaceName ?? null, hosts_seen: hostsSeen, last_seen: new Date().toISOString(),
-  }).then(() => {}, () => {})
+  }
+  try {
+    const { error } = await supabase.from('agent_status').upsert({ ...row, priority: standby.PRIORITY })
+    // priority column not installed yet (supabase/migration_agent_jobs.sql)
+    if (error && /column|schema cache/i.test(error.message)) await supabase.from('agent_status').upsert(row)
+  } catch { /* heartbeat is best-effort */ }
 }
 
 // ── Job 2: SNMP poll (cpu, mem, traffic) ──────────────────────────────────────
+// Which devices to ask, so the agent doesn't send SNMP to every phone each minute:
+//   • devices someone added by hand, and devices that have answered SNMP before — every minute
+//   • other discovered devices — once every 10 minutes, in case SNMP was enabled on them
+// The dashboard's /api/snmp did this while it ran on the LAN; a hosted
+// dashboard can't, so the agent does it (snmp-generic.js).
+const SNMP_RETRY_MS = 10 * 60_000
+const snmpAnswered  = new Set()   // device ids that answered SNMP since the agent started
+const snmpTriedAt   = new Map()   // device id → ms of the last attempt that got no answer
+
 async function pollSnmp() {
-  // Only devices someone set up for SNMP — not every discovered phone
-  let { data: devices, error } = await supabase
-    .from('devices')
-    .select('id, name, ip, snmp_community, snmp_port')
-    .eq('status', 'up')
-    .neq('source', 'discovered')
-  if (error && /column|schema cache/i.test(error.message)) {
-    ;({ data: devices, error } = await supabase
-      .from('devices').select('id, name, ip, snmp_community, snmp_port').eq('status', 'up'))
-  }
-  if (error || !devices?.length) return
+  const { data: all, error } = await supabase.from('devices').select('*')
+  if (error || !all?.length) return
+
+  // MikroTik routers are polled by mikrotik.js with RouterOS-specific OIDs
+  const mikrotikIds = await mikrotik.managedIds(supabase)
+  const now = Date.now()
+  const devices = all.filter(d => {
+    if (!d.snmp_community || mikrotikIds.has(d.id)) return false
+    if (d.status !== 'up' && d.status !== 'warn') return false
+    const known = snmpAnswered.has(d.id) || d.cpu > 0 || d.mem > 0 || (d.uptime && d.uptime !== '—')
+    if (known || (d.source && d.source !== 'discovered')) return true
+    return now - (snmpTriedAt.get(d.id) ?? 0) >= SNMP_RETRY_MS
+  })
+  if (!devices.length) return
 
   const ts = new Date().toISOString()
   let polled = 0
 
-  for (const dev of devices) {
-    const result = await pollSnmpDevice(dev)
-    if (!result) continue
+  const pollOne = async dev => {
+    const result = await generic.pollGenericDevice(dev)
+    if (!result) { snmpTriedAt.set(dev.id, Date.now()); return }
+    snmpAnswered.add(dev.id)
     polled++
 
     const update = { updated_at: ts }
-    if (result.uptime) update.uptime  = result.uptime
+    if (result.uptime)  update.uptime = result.uptime
     if (result.cpu > 0) update.cpu    = result.cpu
     if (result.mem > 0) update.mem    = result.mem
-    await supabase.from('devices').update(update).eq('id', dev.id)
+    const extra = {}
+    if (result.model)    extra.model    = result.model
+    if (result.firmware) extra.firmware = result.firmware
+    const { error: e } = await supabase.from('devices').update({ ...update, ...extra }).eq('id', dev.id)
+    // model/firmware columns not installed (supabase/migration_devices_model_fw.sql)
+    if (e && /column|schema cache/i.test(e.message)) await supabase.from('devices').update(update).eq('id', dev.id)
 
-    if (result.inMbps > 0 || result.outMbps > 0) {
-      await supabase.from('traffic_samples').insert({
+    if (result.interfaces.length) {
+      await supabase.from('traffic_samples').insert(result.interfaces.map(i => ({
         device_name: dev.name,
-        interface:   result.ifName,
-        in_mbps:     result.inMbps,
-        out_mbps:    result.outMbps,
+        interface:   i.ifName,
+        in_mbps:     i.inMbps,
+        out_mbps:    i.outMbps,
         sampled_at:  ts,
-      })
+      })))
     }
+  }
+  // A few at a time: devices that don't answer take seconds to time out
+  for (let i = 0; i < devices.length; i += 8) {
+    await Promise.all(devices.slice(i, i + 8).map(d => pollOne(d).catch(e => console.log(`  [snmp] ${d.ip}: ${e.message}`))))
   }
   console.log(`  [snmp] polled ${polled}/${devices.length} devices`)
 }
@@ -825,6 +856,7 @@ let scanRound = 0
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
 async function runPoll() {
+  if (standby.isStandby()) return   // another agent is monitoring
   console.log(`\n[${new Date().toISOString()}] Running SNMP poll`)
   try { await pollSnmp() } catch (e) { console.log(`  [snmp] failed: ${e.message}`) }
 }
@@ -833,8 +865,13 @@ async function runPoll() {
 // starts right after it — sweeps never overlap.
 async function runScanLoop() {
   const started = Date.now()
-  console.log(`\n[${new Date(started).toISOString()}] Running network scan`)
-  try { await scanNetwork() } catch (e) { console.log(`  [scan] failed: ${e.message}`) }
+  // Stand by (no scanning, alerts or heartbeat) while a higher-priority agent is reporting
+  let idle = false
+  try { idle = await standby.refresh(supabase) } catch { /* stay active */ }
+  if (!idle) {
+    console.log(`\n[${new Date(started).toISOString()}] Running network scan`)
+    try { await scanNetwork() } catch (e) { console.log(`  [scan] failed: ${e.message}`) }
+  }
   setTimeout(runScanLoop, Math.max(0, SCAN_MS - (Date.now() - started)))
 }
 
@@ -842,6 +879,9 @@ console.log('NetWatch Local Agent')
 console.log(`  Platform  : ${process.platform}`)
 console.log(`  Discovery : every ${SCAN_MS / 1000}s (ICMP sweep + ARP), offline after ${FAILS_BEFORE_OFFLINE} missed checks`)
 console.log(`  SNMP      : every ${POLL_MS / 1000}s`)
+console.log(`  MikroTik  : every ${mikrotik.POLL_MS / 1000}s (RouterOS SNMP: system, CPU, memory, interfaces, traffic)`)
+console.log(`  Requests  : every ${jobs.POLL_MS / 1000}s (Add Device / Config Backup from the dashboard)`)
+console.log(`  Agent     : ${standby.AGENT_ID} · priority ${standby.PRIORITY}`)
 console.log(`  Vendors   : ${OUI.size} MAC prefixes loaded`)
 console.log('  Press Ctrl+C to stop.\n')
 
@@ -849,3 +889,11 @@ console.log('  Press Ctrl+C to stop.\n')
 runScanLoop()
 runPoll()
 setInterval(runPoll, POLL_MS)
+mikrotik.start(supabase, () => !standby.isStandby())
+jobs.start(supabase, () => !standby.isStandby())
+
+// A stray network error must never stop monitoring — log it and carry on.
+// (pm2 restarts the agent if it does exit.)
+process.on('unhandledRejection', e => console.log(`  [agent] unhandled error: ${e?.message ?? e}`))
+// Stop cleanly when the service is stopped
+for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { console.log(`\n${sig} received — agent stopping`); process.exit(0) })

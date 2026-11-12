@@ -8,7 +8,21 @@ import {
   LatencyTrendChart, AlertBreakdownChart,
   IncidentFrequencyChart, PeakFailureHoursChart,
   TopDevicesChart, LocationHealthChart, UptimeDowntimeChart,
+  SnmpTrafficVolumeChart, fmtBytes,
 } from '@/components/ReportCharts'
+import type { SnmpReport } from '@/lib/snmp-report'
+
+function fmtRate(mbps: number | null) {
+  if (mbps === null) return '—'
+  if (mbps >= 1000) return `${(mbps / 1000).toFixed(2)} Gbps`
+  if (mbps >= 1)    return `${mbps.toFixed(2)} Mbps`
+  return `${(mbps * 1000).toFixed(1)} Kbps`
+}
+function fmtMinutes(min: number) {
+  if (min < 60) return `${min}m`
+  const h = Math.floor(min / 60), m = min % 60
+  return h < 24 ? `${h}h ${m}m` : `${Math.floor(h / 24)}d ${h % 24}h`
+}
 
 type Period = '24h' | '7d' | '30d'
 
@@ -117,6 +131,35 @@ export default function ReportsPage() {
   useEffect(() => { load() }, [load])
   // Keep data current without a manual refresh
   usePolling(load, 15_000)
+
+  // ── SNMP devices: uptime + traffic from stored history (server-side) ──
+  const [snmpReport, setSnmpReport] = useState<SnmpReport | null>(null)
+  const loadSnmp = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/reports/snmp?period=${period}`)
+      if (r.ok) setSnmpReport(await r.json())
+    } catch { /* keep the last report */ }
+  }, [period])
+  useEffect(() => { loadSnmp() }, [loadSnmp])
+  usePolling(loadSnmp, 60_000)
+
+  const snmp = useMemo(() => {
+    // Only a report for the selected period (ignore one still arriving for the previous period)
+    const devs = snmpReport && snmpReport.period === period ? snmpReport.devices : null
+    if (!devs) return null
+    const measured = devs.filter(d => d.uptimePct !== null)
+    const withTraffic = devs.filter(d => d.avgInMbps !== null)
+    return {
+      devs,
+      upLabels:   measured.map(d => `${d.name} (${d.ip})`),
+      upPct:      measured.map(d => d.uptimePct!),
+      downPct:    measured.map(d => Math.round((100 - d.uptimePct!) * 10) / 10),
+      trLabels:   withTraffic.map(d => `${d.name} (${d.ip})`),
+      trIn:       withTraffic.map(d => d.inBytes),
+      trOut:      withTraffic.map(d => d.outBytes),
+      measuredMin: Math.max(0, ...devs.map(d => d.upMin + d.downMin + d.unknownMin)),
+    }
+  }, [snmpReport, period])
 
   // ── Period-filtered alerts ───────────────────────────────────
   const cutoff = useMemo(() => new Date(Date.now() - PERIOD_MS[period]), [period])
@@ -493,6 +536,78 @@ export default function ReportsPage() {
           <UptimeDowntimeChart key={period} labels={uptimeLabels} uptime={uptimeUp} downtime={uptimeDown} />
         </div>
       </div>
+
+      {/* ── SNMP Devices (hidden when there are no SNMP devices) ── */}
+      {snmp && snmp.devs.length > 0 && (
+        <>
+          <div className="grid-2" style={{ marginBottom: 20 }}>
+            <div className="card">
+              <div className="card-header">
+                SNMP Devices — Uptime vs Downtime
+                <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)', fontWeight: 400 }}>
+                  measured each minute · {fmtMinutes(snmp.measuredMin)} recorded
+                  {period === '30d' && ` (uptime history kept ${snmpReport?.historyDays ?? 7} days)`}
+                </span>
+              </div>
+              <div className="card-body">
+                {snmp.upLabels.length
+                  ? <UptimeDowntimeChart key={`snmp-up-${period}`} labels={snmp.upLabels} uptime={snmp.upPct} downtime={snmp.downPct} />
+                  : <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>No measurements in this period</div>}
+              </div>
+            </div>
+            <div className="card">
+              <div className="card-header">
+                SNMP Devices — Traffic
+                <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)', fontWeight: 400 }}>data transferred in this period</span>
+              </div>
+              <div className="card-body">
+                {snmp.trLabels.length
+                  ? <SnmpTrafficVolumeChart key={`snmp-tr-${period}`} labels={snmp.trLabels} inBytes={snmp.trIn} outBytes={snmp.trOut} />
+                  : <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>No measurements in this period</div>}
+              </div>
+            </div>
+          </div>
+
+          <div className="card" style={{ marginBottom: 20 }}>
+            <div className="card-header">
+              SNMP Device Summary
+              <span style={{ fontSize: 11, color: 'var(--text3)', fontWeight: 400 }}>from SNMP polls and per-minute status checks</span>
+            </div>
+            <div style={{ overflowX: 'auto' }}>
+              <table className="tbl">
+                <thead>
+                  <tr>
+                    <th>Device</th><th>Type</th><th>Uptime</th><th>Downtime</th>
+                    <th>Data In / Out</th><th>Avg In / Out</th><th>Peak In / Out</th><th>CPU / Mem (now)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {snmp.devs.map(d => (
+                    <tr key={d.id}>
+                      <td>
+                        <strong>{d.name}</strong>
+                        <div className="mono" style={{ fontSize: 11, color: 'var(--text3)' }}>{d.ip}</div>
+                      </td>
+                      <td><span className="tag">{d.type}</span></td>
+                      <td>{d.uptimePct !== null ? <UptimeBadge pct={d.uptimePct} /> : <span style={{ color: 'var(--text3)' }}>—</span>}</td>
+                      <td style={{ fontSize: 12 }}>
+                        {d.uptimePct !== null ? fmtMinutes(d.downMin) : '—'}
+                        {d.unknownMin > 0 && <div style={{ fontSize: 11, color: 'var(--text3)' }}>{fmtMinutes(d.unknownMin)} not measured</div>}
+                      </td>
+                      <td style={{ whiteSpace: 'nowrap', fontSize: 12 }}>
+                        {d.avgInMbps !== null ? <><span style={{ color: '#2f81f7' }}>↓ {fmtBytes(d.inBytes)}</span> / <span style={{ color: '#3fb950' }}>↑ {fmtBytes(d.outBytes)}</span></> : '—'}
+                      </td>
+                      <td style={{ whiteSpace: 'nowrap', fontSize: 12 }}>{fmtRate(d.avgInMbps)} / {fmtRate(d.avgOutMbps)}</td>
+                      <td style={{ whiteSpace: 'nowrap', fontSize: 12 }}>{fmtRate(d.peakInMbps)} / {fmtRate(d.peakOutMbps)}</td>
+                      <td style={{ whiteSpace: 'nowrap', fontSize: 12 }}>{d.cpu}% / {d.mem}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* ── Device Performance Summary ── */}
       <div className="card">

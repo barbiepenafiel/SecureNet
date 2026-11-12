@@ -227,3 +227,44 @@ export function UptimeDowntimeChart({ labels, uptime, downtime }: {
   }, [labels, uptime, downtime])
   return <div style={{ position: 'relative', height: labels.length * 20 + 50 }}><canvas ref={ref} /></div>
 }
+
+// Data transferred per SNMP device in the report period (bytes → KB/MB/GB)
+export function fmtBytes(b: number) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let i = 0, v = b
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  return `${v.toFixed(i ? 1 : 0)} ${units[i]}`
+}
+
+export function SnmpTrafficVolumeChart({ labels, inBytes, outBytes }: {
+  labels: string[]; inBytes: number[]; outBytes: number[]
+}) {
+  const ref = useRef<HTMLCanvasElement>(null)
+  useEffect(() => {
+    if (!ref.current) return
+    const c = new Chart(ref.current, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Data In',  data: inBytes,  backgroundColor: '#2f81f7', borderRadius: 3, barThickness: 12 },
+          { label: 'Data Out', data: outBytes, backgroundColor: '#3fb950', borderRadius: 3, barThickness: 12 },
+        ],
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: true, labels: { color: '#8b949e', font: { size: 11 }, boxWidth: 12 } },
+          tooltip: { ...TIP, callbacks: { label: (ctx) => ` ${ctx.dataset.label}: ${fmtBytes(Number(ctx.raw))}` } },
+        },
+        scales: {
+          x: { beginAtZero: true, grid: { color: GRID }, ticks: { ...TICK, callback: (v) => fmtBytes(Number(v)) } },
+          y: { grid: { display: false }, ticks: { color: '#6e7681', font: { size: 10 } } },
+        },
+      },
+    })
+    return () => c.destroy()
+  }, [labels, inBytes, outBytes])
+  return <div style={{ position: 'relative', height: labels.length * 36 + 60 }}><canvas ref={ref} /></div>
+}

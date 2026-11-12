@@ -40,6 +40,17 @@ export async function POST(req: Request) {
 
   const db = adminDb()
 
+  // The in-memory check above doesn't survive on a hosted (serverless)
+  // server, where each instance starts with empty memory — ask the database.
+  if (isAuto) {
+    const { data: recent } = await db.from('report_snapshots').select('generated_at')
+      .eq('generated_by', 'auto').gte('generated_at', new Date(Date.now() - 23 * 60 * 60 * 1000).toISOString()).limit(1)
+    if (recent?.length) {
+      _lastGenerated = new Date(recent[0].generated_at).getTime()
+      return Response.json({ skipped: true, reason: 'Already generated within 23h' })
+    }
+  }
+
   const [devRes, alertRes, slaRes, scanRes, discRes] = await Promise.allSettled([
     db.from('devices').select('id, name, status, cpu').order('name'),
     db.from('alerts').select('id, severity, acked, created_at, resolved_at').order('created_at', { ascending: false }).limit(500),

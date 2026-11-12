@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js'
 import * as snmp from 'net-snmp'
+import { agentOnline } from '@/lib/agent-jobs'
 
 export const runtime = 'nodejs'
 
@@ -174,11 +175,22 @@ export async function POST(req: Request) {
   const db   = adminClient()
   const body = await req.json().catch(() => ({}))
 
-  const { data: devices } = body.id
+  // SNMP polling belongs to the campus agent (poller/agent.js) whenever it is
+  // reporting — polling here as well would write every sample twice. A hosted
+  // (Vercel) server can never reach the campus LAN, so it never polls.
+  if (process.env.VERCEL || await agentOnline(db)) return Response.json({ polled: 0, agent: true })
+
+  const { data: allDevices } = body.id
     ? await db.from('devices').select('id, name, ip, snmp_community, snmp_port').eq('id', body.id)
     : await db.from('devices').select('id, name, ip, snmp_community, snmp_port').neq('status', 'maint')
 
-  if (!devices?.length) return Response.json({ polled: 0 })
+  // MikroTik routers are polled by the agent (poller/mikrotik.js) with
+  // RouterOS-specific OIDs — skip them here so their data isn't overwritten
+  const { data: mikrotik } = await db.from('mikrotik_routers').select('device_id')
+  const mikrotikIds = new Set((mikrotik ?? []).map(r => r.device_id as string))
+  const devices = (allDevices ?? []).filter(d => !mikrotikIds.has(d.id))
+
+  if (!devices.length) return Response.json({ polled: 0 })
 
   const results = await Promise.all(
     devices.map(async (dev) => {
