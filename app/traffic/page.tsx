@@ -178,14 +178,14 @@ export default function TrafficPage() {
 
       {/* KPI row */}
       {hasReal && (
-        <div style={{ display: 'flex', gap: 12, marginBottom: 14 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 14 }}>
           {[
             { label: 'Total Inbound',  value: `${totalIn.toFixed(2)} Mbps`,  color: '#2f81f7' },
             { label: 'Total Outbound', value: `${totalOut.toFixed(2)} Mbps`, color: '#3fb950' },
             { label: 'Devices Polled', value: `${new Set(samples.map(s => s.device_name)).size}`, color: 'var(--text2)' },
             { label: 'Samples (24h)',  value: `${samples.length}`,           color: 'var(--text2)' },
           ].map(k => (
-            <div key={k.label} className="card" style={{ flex: 1, padding: '12px 16px' }}>
+            <div key={k.label} className="card" style={{ flex: '1 1 140px', padding: '12px 16px' }}>
               <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 4 }}>{k.label}</div>
               <div style={{ fontSize: 20, fontWeight: 700, color: k.color }}>{k.value}</div>
             </div>

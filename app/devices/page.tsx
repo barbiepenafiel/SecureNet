@@ -614,7 +614,7 @@ export default function DevicesPage() {
       {/* ── Detail modal ── */}
       {detail && (
         <Modal title={`Device: ${detail.name}`} onClose={() => setDetail(null)}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 16 }}>
+          <div className="form-row" style={{ marginBottom: 16 }}>
             {[
               ['Type',      detail.type],
               ['IP',        detail.ip],

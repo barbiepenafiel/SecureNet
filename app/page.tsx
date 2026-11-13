@@ -161,7 +161,7 @@ export default async function DashboardPage() {
             <div className="card-body" style={{ padding: '12px 16px 12px' }}><LatencyChart /></div>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+          <div className="grid-2">
             {/* Device health */}
             <div className="card">
               <div className="card-header">Device Health</div>

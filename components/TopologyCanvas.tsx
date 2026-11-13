@@ -157,8 +157,13 @@ export default function TopologyCanvas({ devs, clientCounts = {} }: {
   const [boxH, setBoxH] = useState(560)
   const [boxW, setBoxW] = useState(0)
 
+  // Phones / narrow panels: the diagram is drawn at a readable size and
+  // panned by swiping, instead of being shrunk to the screen's width
+  const narrow = boxW > 0 && boxW < 700
   // In "Fit" mode the layout stretches vertically to the canvas's shape
-  const L = useMemo(() => layout(devs, zoom === 1 && boxW ? boxH / boxW : 0), [devs, zoom, boxH, boxW])
+  const L = useMemo(() => layout(devs, zoom === 1 && boxW && !narrow ? boxH / boxW : 0), [devs, zoom, boxH, boxW, narrow])
+  const base = narrow ? Math.max(1, (L.W * 0.6) / boxW) : 1   // ×container width at 100 %
+  const scaled = zoom !== 1 || base !== 1
   const hoverLane = hover ? L.lanes.find(l => l.cards.some(c => c.dev.id === hover.dev.id))?.sub : null
 
   useEffect(() => {
@@ -193,12 +198,12 @@ export default function TopologyCanvas({ devs, clientCounts = {} }: {
         ))}
       </div>
 
-      <div ref={wrapRef} style={{ position: 'relative', overflow: 'auto', height: boxH }} onMouseLeave={() => setHover(null)}>
+      <div ref={wrapRef} style={{ position: 'relative', overflow: 'auto', height: boxH, WebkitOverflowScrolling: 'touch' }} onMouseLeave={() => setHover(null)}>
         <svg viewBox={`0 0 ${L.W} ${L.H}`}
-          width={zoom === 1 ? '100%' : `${zoom * 100}%`}
-          height={zoom === 1 ? '100%' : undefined}
+          width={scaled ? `${zoom * base * 100}%` : '100%'}
+          height={scaled ? undefined : '100%'}
           preserveAspectRatio="xMidYMid meet"
-          style={{ display: 'block', minWidth: zoom > 1 ? undefined : 640, fontFamily: 'var(--font)', background: 'linear-gradient(180deg,#f8fbff,#eef4fa)' }}>
+          style={{ display: 'block', minWidth: zoom > 1 || narrow ? undefined : 640, fontFamily: 'var(--font)', background: 'linear-gradient(180deg,#f8fbff,#eef4fa)' }}>
           <defs>
             <pattern id="topo-dots" width="24" height="24" patternUnits="userSpaceOnUse">
               <circle cx="1" cy="1" r="1" fill="#cbd5e1" opacity=".55"/>

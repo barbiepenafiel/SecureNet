@@ -29,7 +29,7 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
 
   return (
     <div style={{
-      width: 320,
+      width: 320, maxWidth: 'calc(100vw - 32px)',
       borderRadius: 10,
       overflow: 'hidden',
       boxShadow: '0 8px 32px rgba(0,0,0,.45)',

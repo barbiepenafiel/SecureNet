@@ -14,7 +14,7 @@ export default async function AuditLogPage() {
   return (
     <>
       <LiveRefresh tables={LIVE_TABLES} />
-      <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 14 }}>
         <input suppressHydrationWarning className="form-input" style={{ width: 220 }} placeholder="Search log…" />
         <select suppressHydrationWarning className="form-select" style={{ width: 160 }}>
           <option>All actions</option>

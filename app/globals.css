@@ -218,3 +218,128 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 /* ── Topbar title accent ── */
 .topbar-title-wrap { display: flex; align-items: center; gap: 10px; }
 .topbar-title-bar { width: 4px; height: 20px; background: var(--accent); border-radius: 2px; flex-shrink: 0; }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Responsive layout
+   Desktop (> 1100px): unchanged.
+   Tablet (769–1100px): sidebar becomes an icon rail; ☰ opens it in full.
+   Phone (≤ 768px): sidebar becomes a slide-in drawer opened from ☰;
+   grids stack, tables scroll sideways inside their card, modals fit the screen.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* Hidden on desktop */
+.nav-toggle, .sidebar-close, .nav-backdrop { display: none; }
+.nav-toggle {
+  align-items: center; justify-content: center; flex-shrink: 0;
+  width: 36px; height: 36px; border-radius: var(--r); border: 1px solid var(--border2);
+  background: var(--surface); color: var(--text); font-size: 18px; cursor: pointer;
+}
+.nav-toggle:hover { background: var(--surface3); border-color: var(--accent); }
+.sidebar-close {
+  margin-left: 6px; background: none; border: none; color: rgba(255,255,255,.6);
+  font-size: 18px; line-height: 1; cursor: pointer; padding: 4px 6px; border-radius: 4px;
+}
+.sidebar-close:hover { color: #fff; background: var(--sidebar-bg2); }
+.topbar-title-wrap { min-width: 0; }
+.topbar-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── Tablet and phone: menu button, overlay, open drawer ── */
+@media (max-width: 1100px) {
+  .nav-toggle { display: inline-flex; }
+  .app.nav-open .sidebar-close { display: inline-block; }
+  .app.nav-open .nav-backdrop {
+    display: block; position: fixed; inset: 0; z-index: 940;
+    background: rgba(10, 31, 16, .45);
+  }
+  .app.nav-open .sidebar {
+    position: fixed; top: 0; left: 0; bottom: 0; z-index: 950;
+    width: min(260px, 85vw); box-shadow: 8px 0 30px rgba(0,0,0,.25);
+  }
+  .grid-70-30 { grid-template-columns: minmax(0, 1fr); }
+  .grid-3     { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ── Tablet: icon rail ── */
+@media (min-width: 769px) and (max-width: 1100px) {
+  .app { grid-template-columns: 64px 1fr; }
+  .main { grid-column: 2; }   /* stays put while the open menu floats over it */
+  .app:not(.nav-open) .sidebar { overflow-x: hidden; }
+  .app:not(.nav-open) .logo { justify-content: center; padding: 16px 0; }
+  .app:not(.nav-open) .logo-text,
+  .app:not(.nav-open) .logo-clock,
+  .app:not(.nav-open) .nav-label,
+  .app:not(.nav-open) .nav-text,
+  .app:not(.nav-open) .sidebar-user,
+  .app:not(.nav-open) .sidebar-signout { display: none; }
+  .app:not(.nav-open) .nav-section { padding: 6px 0; border-bottom: 1px solid var(--sidebar-bdr); }
+  .app:not(.nav-open) .nav-item { justify-content: center; padding: 11px 0; position: relative; }
+  .app:not(.nav-open) .nav-icon { font-size: 18px; width: auto; }
+  .app:not(.nav-open) .nav-item .badge {
+    position: absolute; top: 3px; right: 6px; margin: 0; font-size: 10px; min-width: 16px; padding: 0 4px;
+  }
+  .app:not(.nav-open) .sidebar-footer { justify-content: center; padding: 12px 0; }
+}
+
+/* ── Phone ── */
+@media (max-width: 768px) {
+  .app  { grid-template-columns: 1fr; height: 100vh; height: 100dvh; }
+  .sidebar {
+    position: fixed; top: 0; left: 0; bottom: 0; z-index: 950; height: 100%;
+    width: min(260px, 85vw); transform: translateX(-100%); transition: transform .22s ease;
+  }
+  .app.nav-open .sidebar { transform: none; }
+  .nav-item { padding: 11px 16px; font-size: 14px; }   /* easier to tap */
+
+  .topbar  { padding: 0 12px; gap: 8px; }
+  .topbar-sep, .topbar-sub, .topbar-divider, .topbar-live { display: none; }
+  .topbar-actions { gap: 6px; }
+  .content { padding: 12px; }
+
+  /* Grids stack */
+  /* minmax(0, …): a column may shrink below its widest content, which then
+     scrolls inside its own card instead of widening the page */
+  .grid-2, .grid-3, .grid-70-30, .kpi-row-3, .form-row { grid-template-columns: minmax(0, 1fr); }
+  .kpi-row { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .kpi { padding: 14px 16px; }
+  .kpi-value { font-size: 26px; }
+  .kpi-icon { width: 38px; height: 38px; font-size: 17px; }
+  .hero-banner { padding: 16px 18px; }
+  .hero-title { font-size: 18px; }
+
+  /* Cards */
+  .card-header { flex-wrap: wrap; padding: 12px 14px; }
+  .card-header-actions { flex-wrap: wrap; }
+  .card-body { padding: 12px; }
+
+  /* Tables: scroll sideways inside their card instead of widening the page */
+  .tbl { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tbl th, .tbl td { padding: 8px 10px; }
+
+  /* Tabs scroll sideways */
+  .tabs { overflow-x: auto; scrollbar-width: none; }
+  .tab  { white-space: nowrap; flex-shrink: 0; }
+
+  /* Alerts */
+  .alert-item { flex-wrap: wrap; padding: 12px; }
+  .alert-actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
+
+  /* Modals fit the screen */
+  .modal-overlay { padding: 10px; align-items: flex-end; }
+  .modal { max-height: 92vh; max-height: 92dvh; width: 100%; }
+  .modal-header { padding: 14px 16px; }
+  .modal-body   { padding: 16px; }
+  .modal-footer { padding: 12px 16px; flex-wrap: wrap; }
+
+  /* Inputs and buttons big enough to tap; 16px text stops iOS zooming on focus */
+  .form-input, .form-select, .form-textarea { font-size: 16px; min-height: 40px; }
+  .btn    { min-height: 36px; }
+  .btn-sm { min-height: 32px; }
+  .content .form-input, .content .form-select { max-width: 100%; }
+}
+
+/* Small phones: icon-only top-bar buttons */
+@media (max-width: 560px) {
+  .btn-text { display: none; }
+  .topbar-title { font-size: 14px; }
+  .topbar-title-bar { display: none; }
+}

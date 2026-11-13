@@ -106,7 +106,7 @@ export default function AIInsightsButton() {
       {open && (
         <div style={{
           position: 'fixed', bottom: 86, right: 24, zIndex: 1100,
-          width: 360,
+          width: 360, maxWidth: 'calc(100vw - 32px)',
           background: 'var(--surface)',
           border: '1px solid var(--border)',
           borderRadius: 14,

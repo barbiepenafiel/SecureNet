@@ -41,7 +41,7 @@ const NAV_GROUPS = [
   },
 ]
 
-export default function Sidebar() {
+export default function Sidebar({ onClose }: { onClose?: () => void }) {
   const path = usePathname()
   const { profile, signOut } = useAuth()
   const isAdmin = profile?.role === 'net_admin'
@@ -90,11 +90,13 @@ export default function Sidebar() {
   }
 
   return (
-    <aside className="sidebar">
+    <aside className="sidebar" aria-label="Main navigation">
       <div className="logo">
         <div className="logo-dot" />
-        <span>Securenet</span>
-        <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)' }}>{clock}</span>
+        <span className="logo-text">Securenet</span>
+        <span className="logo-clock" style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)' }}>{clock}</span>
+        {/* Closes the menu on tablets and phones (hidden on desktop) */}
+        <button type="button" className="sidebar-close" onClick={onClose} aria-label="Close menu" suppressHydrationWarning>✕</button>
       </div>
 
       <nav>
@@ -106,9 +108,10 @@ export default function Sidebar() {
                 key={item.href}
                 href={item.href}
                 className={`nav-item${isActive(item.href) ? ' active' : ''}`}
+                title={item.label}
               >
                 <span className="nav-icon">{item.icon}</span>
-                {item.label}
+                <span className="nav-text">{item.label}</span>
                 {item.badge && alertBadge > 0 && (
                   <span className="badge">{alertBadge}</span>
                 )}
@@ -124,7 +127,7 @@ export default function Sidebar() {
           <strong style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayName}</strong>
           <span>{profile ? ROLE_LABEL[profile.role] : ''}</span>
         </div>
-        <button onClick={signOut} title="Sign out" aria-label="Sign out" suppressHydrationWarning
+        <button className="sidebar-signout" onClick={signOut} title="Sign out" aria-label="Sign out" suppressHydrationWarning
           style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,.5)', cursor: 'pointer', fontSize: 16, padding: 4 }}>
           ⏻
         </button>

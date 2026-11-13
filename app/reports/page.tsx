@@ -443,7 +443,7 @@ export default function ReportsPage() {
       </div>
 
       {/* ── 4 KPI tiles ── */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginBottom: 20 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12, marginBottom: 20 }}>
         <KpiTile label="Devices Monitored" value={devicesMonitored} sub={`${devices.length} managed · ${discovered.length} discovered`} iconBg="rgba(47,129,247,.18)" icon="🖥" />
         <KpiTile label="Avg Uptime"        value={`${avgUptime}%`}  sub="Network-wide availability" iconBg="rgba(34,197,94,.18)"  icon="📶" />
         <KpiTile label="Avg Latency"       value={avgLatency === '—' ? '—' : `${avgLatency} ms`} sub="Mean ICMP response time" iconBg="rgba(210,153,34,.18)" icon="⚡" />

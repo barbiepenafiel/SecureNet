@@ -629,7 +629,7 @@ const FB: React.CSSProperties = {
   border: '1px solid var(--border)',
   borderTop: '3px solid var(--accent)',
   borderRadius: '10px 10px 0 0',
-  display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+  display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(140px, 100%), 1fr))',
   gap: 12, padding: '12px 16px',
 }
 const FI: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0 }
