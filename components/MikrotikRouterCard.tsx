@@ -134,31 +134,6 @@ function RouterPanel({ r, ifaces, now }: { r: Router; ifaces: Iface[]; now: numb
       </div>
 
       <div className="card-body">
-        {!r.reachable && (
-          <div style={{ border: `1px solid ${noAnswer.color}`, background: 'var(--surface2)', borderRadius: 8, padding: '10px 12px', marginBottom: 14, fontSize: 12, lineHeight: 1.6 }}>
-            {r.snmp_status && SNMP_STATE[r.snmp_status] ? (
-              // The agent's diagnosis: unreachable / disabled / access refused / timeout
-              <><strong style={{ color: noAnswer.color }}>{noAnswer.title}</strong>{' '}{r.last_error}</>
-            ) : hasData ? (
-              <><strong style={{ color: 'var(--crit)' }}>Lost contact with the router.</strong>{' '}
-                It stopped answering SNMP — it may be powered off, unplugged, or its SNMP settings changed.</>
-            ) : (
-              <><strong style={{ color: 'var(--crit)' }}>The router isn&apos;t answering SNMP.</strong>{' '}{r.last_error}</>
-            )}
-            {hasData && (
-              <div style={{ color: 'var(--text3)' }}>
-                Live status and traffic are hidden until it answers again; values marked &ldquo;last&rdquo; are from the last successful poll.
-              </div>
-            )}
-          </div>
-        )}
-        {r.reachable && stale && (
-          <div style={{ border: '1px solid var(--warn)', background: 'rgba(210,153,34,.08)', borderRadius: 8, padding: '10px 12px', marginBottom: 14, fontSize: 12, lineHeight: 1.6 }}>
-            <strong style={{ color: 'var(--warn)' }}>The SecureNet agent stopped reporting.</strong>{' '}
-            The router&apos;s current state is unknown — check that the agent is running (<code className="mono">pm2 status securenet</code>).
-          </div>
-        )}
-
         {hasData && (
           <>
             {/* Identity */}
@@ -260,7 +235,18 @@ export default function MikrotikRouterCard() {
       setState(/schema cache|does not exist|relation/i.test(r.error.message) ? 'missing' : 'ready')
       return
     }
-    setRouters((r.data ?? []) as Router[])
+    // One panel per physical router: rows that never returned router data
+    // (another port/address of a router, or a failed probe) are left out, and
+    // rows with the same serial number are shown once (the latest one)
+    const all = (r.data ?? []) as Router[]
+    const withData = all.filter(x => x.serial || x.uptime_seconds !== null)
+    const bySerial = new Map<string, Router>()
+    for (const x of withData.length ? withData : all) {
+      const key = x.serial ?? x.device_id
+      const prev = bySerial.get(key)
+      if (!prev || x.polled_at > prev.polled_at) bySerial.set(key, x)
+    }
+    setRouters([...bySerial.values()].sort((a, b) => a.device_name.localeCompare(b.device_name)))
     setIfaces((i.data ?? []) as Iface[])
     setState('ready')
   }, [])
@@ -291,15 +277,8 @@ export default function MikrotikRouterCard() {
     return (
       <div className="card">
         <div className="card-header">📶 MikroTik Router</div>
-        <div className="card-body" style={{ fontSize: 12, color: 'var(--text2)', lineHeight: 1.7 }}>
-          {state === 'missing' ? (
-            <>Router monitoring isn&apos;t set up in the database yet. Run{' '}
-              <code className="mono">supabase/migration_mikrotik_snmp.sql</code> in the Supabase SQL Editor.</>
-          ) : (
-            <>No MikroTik router found yet. Enable SNMP on the router, then make sure the router is in
-              {' '}<a href="/devices">Devices</a> with its SNMP community. The local agent detects RouterOS
-              automatically and starts showing its data here within 15 seconds.</>
-          )}
+        <div className="card-body" style={{ fontSize: 12, color: 'var(--text3)' }}>
+          No MikroTik router detected
         </div>
       </div>
     )

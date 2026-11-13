@@ -14,6 +14,7 @@
 const os   = require('os')
 const snmp = require('net-snmp')
 const { probeDevice, IPV4 } = require('./probe')
+const snmpStatus = require('./snmp-status')
 
 const POLL_MS      = parseInt(process.env.JOB_POLL_MS ?? '2000', 10)
 const MAX_AGE_MS   = 2 * 60_000        // older requests are abandoned, never run late
@@ -82,7 +83,11 @@ async function buildSnapshot(ip, community, port, deviceName, deviceType) {
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 const HANDLERS = {
-  probe: p => probeDevice(String(p.ip ?? ''), p.community ? String(p.community) : null, p.port ?? 161),
+  // payload.test → SNMP connection test for a configured address/version/community/port;
+  // otherwise the Add Device check of one IP
+  probe: p => p.test
+    ? snmpStatus.connectionTest({ host: p.host, port: p.port ?? 161, community: p.community, version: p.version, everAnswered: !!p.everAnswered })
+    : probeDevice(String(p.ip ?? ''), p.community ? String(p.community) : null, p.port ?? 161),
 
   config_snapshot: async p => {
     const devices = Array.isArray(p.devices) ? p.devices.slice(0, 300) : []
@@ -118,7 +123,10 @@ async function runJob(db, job) {
   try {
     const result = await handler(job.payload ?? {})
     await done({ status: 'done', result })
-    console.log(`  [jobs] ${job.type} done${job.type === 'probe' ? ` (${job.payload?.ip}: ${result.reachable ? 'reachable' : 'no answer'})` : ''}`)
+    const note = job.type !== 'probe' ? ''
+      : job.payload?.test ? ` (SNMP test ${job.payload.host}: ${result.label})`
+      : ` (${job.payload?.ip}: ${result.reachable ? 'reachable' : 'no answer'})`
+    console.log(`  [jobs] ${job.type} done${note}`)
   } catch (e) {
     await done({ status: 'error', error: String(e?.message ?? e).slice(0, 300) })
     console.log(`  [jobs] ${job.type} failed: ${e?.message ?? e}`)

@@ -137,19 +137,22 @@ export default function RecentAlertsCard() {
     const connect = () => {
       if (stopped) return
       setConn(attempt === 0 ? 'connecting' : 'reconnecting')
-      channel = supabase
+      const ch = supabase
         .channel(`recent-alerts-${Date.now()}`)
         .on('postgres_changes', { event: '*', schema: 'public', table: 'alerts' }, onChange)
-        .subscribe(status => {
-          if (stopped) return
+      channel = ch
+      ch.subscribe(status => {
+          // Ignore channels that were already replaced or removed — removing a
+          // channel reports CLOSED again, which must not trigger another removal
+          if (stopped || ch !== channel) return
           if (status === 'SUBSCRIBED') {
             attempt = 0
             setConn('live')
             loadAlerts()                   // catch up on anything missed while disconnected
           } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
             setConn('reconnecting')
-            if (channel) supabase.removeChannel(channel)
             channel = null
+            supabase.removeChannel(ch)
             const delay = Math.min(30_000, 1_000 * 2 ** attempt++)   // 1 s, 2 s, 4 s … max 30 s
             if (retry) clearTimeout(retry)
             retry = setTimeout(connect, delay)

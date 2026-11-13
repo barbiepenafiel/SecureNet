@@ -72,7 +72,7 @@ const IF_STATUS = { 1: 'up', 2: 'down', 3: 'testing', 4: 'unknown', 5: 'dormant'
 // ── SNMP helpers ──────────────────────────────────────────────────────────────
 function openSession(dev) {
   const s = snmp.createSession(dev.ip, dev.snmp_community, {
-    port: dev.snmp_port ?? 161, version: snmp.Version2c, timeout: 2000, retries: 1,
+    port: dev.snmp_port ?? 161, version: st.versionOf(dev.snmp_version), timeout: 2000, retries: 1,
   })
   s.on('error', () => {})   // socket errors must not crash the agent
   return s
@@ -189,10 +189,11 @@ async function currentGateways() {
 }
 
 // Other addresses where this router might answer from the current network
-async function alternateAddresses(dev, known, announced = null) {
+async function alternateAddresses(dev, known, announced = null, recordIp = null) {
   const own = st.ownAddresses()
-  // First the address the router is announcing right now, then its other known addresses and the gateway
-  const set = new Set([...(announced ? [announced] : []), ...(known?.addresses ?? []), ...(await currentGateways())])
+  // First the address the router is announcing right now, then the address on
+  // its device record, its other known addresses and the gateway
+  const set = new Set([...(announced ? [announced] : []), ...(recordIp ? [recordIp] : []), ...(known?.addresses ?? []), ...(await currentGateways())])
   set.delete(dev.ip)
   return [...set].filter(ip => st.IPV4.test(ip) && !own.has(ip)).slice(0, 12)
 }
@@ -488,12 +489,19 @@ async function round() {
   const known = await knownRouters()
   for (const d of candidates) if (known.get(d.id)?.everAnswered) mikrotikIds.add(d.id)
 
-  await Promise.all(candidates.map(async dev => {
-    const p = probed.get(dev.id)
-    if (!mikrotikIds.has(dev.id) && p && now - p.at < (p.answered ? RECHECK_OTHER_MS : RECHECK_NO_ANSWER_MS)) return
+  await Promise.all(candidates.map(async rec => {
+    const p = probed.get(rec.id)
+    if (!mikrotikIds.has(rec.id) && p && now - p.at < (p.answered ? RECHECK_OTHER_MS : RECHECK_NO_ANSWER_MS)) return
+
+    // The address SNMP is sent to: the reachable address configured for this
+    // device (e.g. its address over a VPN or on another subnet), otherwise
+    // the address on the device record. Nothing here is tied to one network.
+    const host = st.IPV4.test(rec.snmp_host ?? '') ? rec.snmp_host : rec.ip
+    const dev  = host === rec.ip ? rec : { ...rec, ip: host }
 
     const community = dev.snmp_community
     const port      = dev.snmp_port ?? 161
+    const ver       = st.versionOf(dev.snmp_version)
     const k         = known.get(dev.id)
     // Is this router announcing itself on a network the agent is attached to right now?
     const seen      = k?.macs.size ? mndp.find(k.macs) : null
@@ -501,7 +509,7 @@ async function round() {
     // 1. Is the device reachable from the network the agent is on now?
     //    A ping reply — or, for devices that block ping, one quick SNMP reply.
     //    Only then is the full SNMP collection attempted.
-    let reachableAt = (await st.ping(dev.ip, 1)) || (await st.quickGet(dev.ip, community, port)) ? dev.ip : null
+    let reachableAt = (await st.ping(dev.ip, 1)) || (await st.quickGet(dev.ip, community, port, undefined, ver)) ? dev.ip : null
     let data = null
     let via  = null
     let otherDevice = null   // MAC of a different device using the router's address on this network
@@ -519,9 +527,9 @@ async function round() {
       // 2. Not answering there: the same router at one of its other addresses
       //    (or the current gateway), proven by its serial number
       if (!data && k?.serial) {
-        const alts = await alternateAddresses(dev, k, seen?.ip)
+        const alts = await alternateAddresses(dev, k, seen?.ip, rec.ip)
         const found = await Promise.all(alts.map(async ip => {
-          const vb = await st.quickGet(ip, community, port, [SCALARS.mtxrSerialNumber])
+          const vb = await st.quickGet(ip, community, port, [SCALARS.mtxrSerialNumber], ver)
           return vb && str(vb[0]) === k.serial ? ip : null
         }))
         const alt = found.find(Boolean)

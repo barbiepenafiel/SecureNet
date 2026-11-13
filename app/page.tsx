@@ -24,6 +24,13 @@ const SNMP_TAG: Record<string, [string, string]> = {
   auth_failed: ['SNMP auth failed', 'chip-warn'],
   timeout:     ['SNMP timeout', 'chip-warn'],
 }
+// SNMP monitor state (poller/snmp-status.js) — takes precedence when present
+const SNMP_STATE_TAG: Record<string, [string, string]> = {
+  online:  ['Online', 'chip-ok'],
+  warning: ['Warning', 'chip-warn'],
+  offline: ['Offline', 'chip-crit'],
+  unknown: ['Not checked (agent off-network)', 'chip-off'],
+}
 
 function PBar({ pct, cls }: { pct: number; cls: string }) {
   return (
@@ -221,28 +228,42 @@ export default async function DashboardPage() {
               <tr><th>Device Name</th><th>Type</th><th>IP Address</th><th>Location</th><th>Status</th><th>CPU %</th><th>Uptime</th></tr>
             </thead>
             <tbody>
-              {statusRows.map(d => (
+              {statusRows.map(d => {
+                // SNMP devices: the Status column shows the agent's SNMP monitor
+                // (Online / Warning / Offline); other devices keep the ICMP/ARP status
+                const s = d as Device & { snmp_status?: string | null; snmp_detail?: string | null; snmp_state?: string | null; snmp_fail_count?: number | null; snmp_down_since?: string | null }
+                const snmpState = SNMP_STATE_TAG[s.snmp_state ?? '']
+                const missed = s.snmp_state === 'warning' || s.snmp_state === 'offline'
+                  ? `Missed ${s.snmp_fail_count ?? 0} SNMP check(s)${s.snmp_down_since ? ` since ${new Date(s.snmp_down_since).toLocaleTimeString()}` : ''}. `
+                  : ''
+                return (
                 <tr key={d.id}>
                   <td>
                     <strong>{d.name}</strong>
-                    {answeredSnmp(d) && (() => {
-                      // The agent's SNMP diagnosis, judged from the network it is on right now
-                      const s = d as Device & { snmp_status?: string | null; snmp_detail?: string | null }
-                      const [label, cls] = SNMP_TAG[s.snmp_status ?? ''] ?? ['SNMP', 'chip-info']
-                      return <span className={`chip ${cls}`} style={{ marginLeft: 8 }} title={s.snmp_detail ?? undefined}>{label}</span>
-                    })()}
+                    {snmpState
+                      ? <span className="chip chip-info" style={{ marginLeft: 8 }} title="Status is from SNMP checks">SNMP</span>
+                      : answeredSnmp(d) && (() => {
+                        // Before supabase/migration_snmp_monitoring.sql: the agent's SNMP diagnosis
+                        const [label, cls] = SNMP_TAG[s.snmp_status ?? ''] ?? ['SNMP', 'chip-info']
+                        return <span className={`chip ${cls}`} style={{ marginLeft: 8 }} title={s.snmp_detail ?? undefined}>{label}</span>
+                      })()}
                   </td>
                   <td><span className="tag">{d.type}</span></td>
                   <td className="mono">{d.ip}</td>
                   <td>{d.location}</td>
-                  <td>{statusChip(d.status)}</td>
+                  <td>
+                    {snmpState
+                      ? <span className={`chip ${snmpState[1]}`} title={`${missed}${s.snmp_detail ?? ''}` || undefined}>{snmpState[0]}</span>
+                      : statusChip(d.status)}
+                  </td>
                   <td style={{ color: d.cpu >= 90 ? 'var(--crit)' : d.cpu >= 75 ? 'var(--warn)' : 'var(--ok)', fontWeight: 500 }}>
                     {/* 0 % is a real reading for SNMP devices; others have no CPU data */}
                     {d.cpu || answeredSnmp(d) ? `${d.cpu}%` : '—'}
                   </td>
                   <td className="mono" style={{ fontSize: 12 }}>{d.uptime}</td>
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
         </div>

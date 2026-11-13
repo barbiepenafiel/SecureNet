@@ -61,10 +61,6 @@ function NoTrafficYet() {
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: 220, color: 'var(--text3)', gap: 8 }}>
       <div style={{ fontSize: 32 }}>📡</div>
       <div style={{ fontWeight: 600, fontSize: 14 }}>No traffic samples yet</div>
-      <div style={{ fontSize: 12, textAlign: 'center', maxWidth: 260 }}>
-        SNMP polls every 30 s. Two consecutive polls needed to calculate Mbps.<br/>
-        Wait ~1 minute or visit <code style={{ background: 'var(--bg2)', padding: '1px 5px', borderRadius: 4 }}>/api/snmp</code> to trigger now.
-      </div>
     </div>
   )
 }

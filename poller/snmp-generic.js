@@ -27,11 +27,11 @@ const ifOids = idx => [
   `1.3.6.1.2.1.2.2.1.16.${idx}`,   // ifOutOctets
 ]
 
-function snmpGet(ip, community, port, oids) {
+function snmpGet(ip, community, port, oids, version = snmp.Version2c) {
   return new Promise(resolve => {
     let s = null
     try {
-      s = snmp.createSession(ip, community, { port, timeout: 3000, retries: 1, version: snmp.Version2c })
+      s = snmp.createSession(ip, community, { port, timeout: 3000, retries: 1, version })
       s.on('error', () => { try { s.close() } catch {} resolve([]) })   // socket errors must not crash the agent
       s.get(oids, (err, vb) => { try { s.close() } catch {} resolve(err ? [] : (vb ?? [])) })
     } catch {
@@ -87,10 +87,11 @@ const MAX_PLAUSIBLE_MBPS = 100_000
 async function pollGenericDevice(dev) {
   const community = dev.snmp_community ?? 'public'
   const port      = dev.snmp_port ?? 161
+  const version   = String(dev.snmp_version ?? '2c') === '1' ? snmp.Version1 : snmp.Version2c
 
   const vb = await snmpGet(dev.ip, community, port, [
     OID_SYS_DESCR, OID_SYS_NAME, OID_UPTIME, OID_CPU_IDLE, OID_MEM_TOTAL, OID_MEM_FREE,
-  ])
+  ], version)
   if (!vb.length) return null
 
   const { model, firmware } = parseSysDescr(val(vb[0])?.toString() ?? '')
@@ -107,7 +108,7 @@ async function pollGenericDevice(dev) {
   const rebooted = prevUptime.has(dev.ip) && ticks < prevUptime.get(dev.ip)
   prevUptime.set(dev.ip, ticks)
 
-  const ifVb = await snmpGet(dev.ip, community, port, Array.from({ length: MAX_IF }, (_, i) => ifOids(i + 1)).flat())
+  const ifVb = await snmpGet(dev.ip, community, port, Array.from({ length: MAX_IF }, (_, i) => ifOids(i + 1)).flat(), version)
   const now = Date.now()
   const interfaces = []
   for (let i = 0; ifVb.length && i < MAX_IF; i++) {

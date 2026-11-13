@@ -740,19 +740,27 @@ async function pollSnmp() {
   // SNMP has answered for this device before / someone set it up by hand
   const knownSnmp = d => snmpAnswered.has(d.id) || d.cpu > 0 || d.mem > 0 || (d.uptime && d.uptime !== '—')
   const snmpDevice = d => knownSnmp(d) || (d.source && d.source !== 'discovered')
+  // A reachable SNMP address configured for the device (e.g. its address over
+  // a VPN or on another subnet) is used instead of the address on its record
+  const snmpHost = d => (snmpStatus.IPV4.test(d.snmp_host ?? '') && d.snmp_host !== d.ip ? d.snmp_host : null)
   const candidates = all.filter(d => d.snmp_community && d.status !== 'maint' && !mikrotikIds.has(d.id))
 
   // Reachability first: SNMP is only attempted on devices the ICMP/ARP check
   // (reconcileDevices) found online from the network the agent is on now.
   // An SNMP device that isn't reachable is recorded as "SNMP unreachable" —
   // never as disabled, because nothing can be known about its SNMP service.
+  // (A device with its own SNMP address is judged at that address, below.)
+  // Answering the SNMP monitor right now (snmp-status.js) — e.g. over a VPN,
+  // where the ICMP check cannot judge the device — counts as reachable
+  const snmpLive = d => snmpStatus.monitorState(d.id) === 'online'
   for (const d of candidates) {
-    if (d.status === 'up' || d.status === 'warn' || !snmpDevice(d)) continue
+    if (d.status === 'up' || d.status === 'warn' || snmpLive(d) || !snmpDevice(d) || snmpHost(d)) continue
     const diag = await snmpStatus.diagnoseNoAnswer({ ip: d.ip, port: d.snmp_port ?? 161, community: d.snmp_community, reachable: false })
     await snmpStatus.writeDeviceStatus(supabase, d.id, diag.status, diag.detail)
   }
 
   const devices = candidates.filter(d => {
+    if (snmpHost(d) || snmpLive(d)) return true
     if (d.status !== 'up' && d.status !== 'warn') return false
     if (snmpDevice(d)) return true
     return now - (snmpTriedAt.get(d.id) ?? 0) >= SNMP_RETRY_MS
@@ -762,14 +770,20 @@ async function pollSnmp() {
   const ts = new Date().toISOString()
   let polled = 0
 
-  const pollOne = async dev => {
-    const result = await generic.pollGenericDevice(dev)
+  const pollOne = async rec => {
+    const host = snmpHost(rec)
+    const dev  = host ? { ...rec, ip: host } : rec
+    // With its own SNMP address, reachability is checked at that address first
+    const reachable = host ? await snmpStatus.ping(host, 1) : true
+    const result = !host || reachable || await snmpStatus.quickGet(host, dev.snmp_community, dev.snmp_port ?? 161, undefined, snmpStatus.versionOf(dev.snmp_version))
+      ? await generic.pollGenericDevice(dev)
+      : null
     if (!result) {
       snmpTriedAt.set(dev.id, Date.now())
-      // Reachable but silent: SNMP disabled, access refused, or timeout?
-      if (snmpDevice(dev)) {
+      // Silent: unreachable, SNMP disabled, access refused, or timeout?
+      if (snmpDevice(dev) || host) {
         const diag = await snmpStatus.diagnoseNoAnswer({
-          ip: dev.ip, port: dev.snmp_port ?? 161, community: dev.snmp_community, reachable: true, everAnswered: !!knownSnmp(dev),
+          ip: dev.ip, port: dev.snmp_port ?? 161, community: dev.snmp_community, reachable, everAnswered: !!knownSnmp(dev),
         })
         await snmpStatus.writeDeviceStatus(supabase, dev.id, diag.status, diag.detail)
       }
@@ -905,6 +919,7 @@ console.log(`  Platform  : ${process.platform}`)
 console.log(`  Discovery : every ${SCAN_MS / 1000}s (ICMP sweep + ARP), offline after ${FAILS_BEFORE_OFFLINE} missed checks`)
 console.log(`  SNMP      : every ${POLL_MS / 1000}s`)
 console.log(`  MikroTik  : every ${mikrotik.POLL_MS / 1000}s (RouterOS SNMP: system, CPU, memory, interfaces, traffic)`)
+console.log(`  SNMP check: every ${snmpStatus.MON.checkMs / 1000}s per SNMP device — Warning on a missed reply (re-check every ${snmpStatus.MON.recheckMs / 1000}s), Offline after ${snmpStatus.MON.offlineAfterMs / 1000}s and ${snmpStatus.MON.minFails} misses`)
 console.log(`  Requests  : every ${jobs.POLL_MS / 1000}s (Add Device / Config Backup from the dashboard)`)
 console.log(`  Agent     : ${standby.AGENT_ID} · priority ${standby.PRIORITY}`)
 console.log(`  Vendors   : ${OUI.size} MAC prefixes loaded`)
@@ -916,6 +931,7 @@ runPoll()
 setInterval(runPoll, POLL_MS)
 mikrotik.start(supabase, () => !standby.isStandby())
 jobs.start(supabase, () => !standby.isStandby())
+snmpStatus.startMonitor(supabase, () => !standby.isStandby())
 
 // A stray network error must never stop monitoring — log it and carry on.
 // (pm2 restarts the agent if it does exit.)

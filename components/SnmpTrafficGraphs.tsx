@@ -188,7 +188,7 @@ export default function SnmpTrafficGraphs() {
           <div style={{ height: 120, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text3)' }}>Loading…</div>
         ) : graphs.length === 0 ? (
           <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>
-            No SNMP devices yet. Add one with <strong>+ Add Device</strong> — devices that answer SNMP get a graph here.
+            No SNMP devices
           </div>
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 460px), 1fr))', gap: 14 }}>
