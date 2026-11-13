@@ -29,6 +29,7 @@ const snmp = require('net-snmp')
 const { createClient } = require('@supabase/supabase-js')
 const mikrotik = require('./mikrotik')   // MikroTik RouterOS SNMP collector
 const generic  = require('./snmp-generic') // SNMP poll for every other SNMP device
+const snmpStatus = require('./snmp-status') // why a device didn't answer SNMP
 const jobs     = require('./jobs')       // LAN requests from the (hosted) dashboard
 const standby  = require('./standby')    // only one agent monitors at a time
 
@@ -736,11 +737,24 @@ async function pollSnmp() {
   // MikroTik routers are polled by mikrotik.js with RouterOS-specific OIDs
   const mikrotikIds = await mikrotik.managedIds(supabase)
   const now = Date.now()
-  const devices = all.filter(d => {
-    if (!d.snmp_community || mikrotikIds.has(d.id)) return false
+  // SNMP has answered for this device before / someone set it up by hand
+  const knownSnmp = d => snmpAnswered.has(d.id) || d.cpu > 0 || d.mem > 0 || (d.uptime && d.uptime !== '—')
+  const snmpDevice = d => knownSnmp(d) || (d.source && d.source !== 'discovered')
+  const candidates = all.filter(d => d.snmp_community && d.status !== 'maint' && !mikrotikIds.has(d.id))
+
+  // Reachability first: SNMP is only attempted on devices the ICMP/ARP check
+  // (reconcileDevices) found online from the network the agent is on now.
+  // An SNMP device that isn't reachable is recorded as "SNMP unreachable" —
+  // never as disabled, because nothing can be known about its SNMP service.
+  for (const d of candidates) {
+    if (d.status === 'up' || d.status === 'warn' || !snmpDevice(d)) continue
+    const diag = await snmpStatus.diagnoseNoAnswer({ ip: d.ip, port: d.snmp_port ?? 161, community: d.snmp_community, reachable: false })
+    await snmpStatus.writeDeviceStatus(supabase, d.id, diag.status, diag.detail)
+  }
+
+  const devices = candidates.filter(d => {
     if (d.status !== 'up' && d.status !== 'warn') return false
-    const known = snmpAnswered.has(d.id) || d.cpu > 0 || d.mem > 0 || (d.uptime && d.uptime !== '—')
-    if (known || (d.source && d.source !== 'discovered')) return true
+    if (snmpDevice(d)) return true
     return now - (snmpTriedAt.get(d.id) ?? 0) >= SNMP_RETRY_MS
   })
   if (!devices.length) return
@@ -750,9 +764,20 @@ async function pollSnmp() {
 
   const pollOne = async dev => {
     const result = await generic.pollGenericDevice(dev)
-    if (!result) { snmpTriedAt.set(dev.id, Date.now()); return }
+    if (!result) {
+      snmpTriedAt.set(dev.id, Date.now())
+      // Reachable but silent: SNMP disabled, access refused, or timeout?
+      if (snmpDevice(dev)) {
+        const diag = await snmpStatus.diagnoseNoAnswer({
+          ip: dev.ip, port: dev.snmp_port ?? 161, community: dev.snmp_community, reachable: true, everAnswered: !!knownSnmp(dev),
+        })
+        await snmpStatus.writeDeviceStatus(supabase, dev.id, diag.status, diag.detail)
+      }
+      return
+    }
     snmpAnswered.add(dev.id)
     polled++
+    await snmpStatus.writeDeviceStatus(supabase, dev.id, 'responding', `Answering SNMP at ${dev.ip}.`)
 
     const update = { updated_at: ts }
     if (result.uptime)  update.uptime = result.uptime

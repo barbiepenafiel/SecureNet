@@ -10,6 +10,7 @@ import { promises as dns } from 'dns'
 import os from 'os'
 import * as snmp from 'net-snmp'
 import { lookupOui } from '@/lib/oui'
+import { diagnoseNoAnswer, type SnmpStatus } from '@/lib/snmp-status'
 
 const execAsync = promisify(exec)
 
@@ -28,6 +29,8 @@ export interface ProbeResult {
     sysName: string | null; sysDescr: string | null; sysObjectID: string | null
     uptime: string | null; location: string | null; contact: string | null
     tried: string[]
+    status: SnmpStatus               // responding / unreachable / disabled / auth_failed / timeout
+    detail: string                   // why, in plain words
   }
   hostname: string | null
   vendor: string | null
@@ -202,6 +205,11 @@ export async function probeDevice(ip: string, community: string | null, port = 1
   const name = sysName ?? hostname?.split('.')[0] ?? (vendor ? `${vendor} ${ip}` : '')
   const method = ping.ok ? 'ICMP' : mac ? 'ARP' : s.vb ? 'SNMP' : null
 
+  // Why SNMP didn't answer: unreachable / disabled / timeout
+  const snmpState: { status: SnmpStatus; detail: string } = s.vb
+    ? { status: 'responding', detail: `Answered SNMP ${s.version} with community "${s.community}".` }
+    : await diagnoseNoAnswer({ ip, port, community: communities[0], reachable: ping.ok || !!mac, everAnswered: false })
+
   return {
     ip,
     probedAt: new Date().toISOString(),
@@ -215,6 +223,7 @@ export async function probeDevice(ip: string, community: string | null, port = 1
       uptime: ticks !== null && Number.isFinite(ticks) ? fmtTicks(ticks) : null,
       location: vbStr(s.vb?.[5]), contact: vbStr(s.vb?.[3]),
       tried: s.tried,
+      status: snmpState.status, detail: snmpState.detail,
     },
     hostname,
     vendor,

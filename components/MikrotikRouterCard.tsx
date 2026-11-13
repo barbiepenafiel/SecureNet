@@ -19,6 +19,7 @@ interface Router {
   disk_total_bytes: number | null; disk_used_bytes: number | null
   temperature_c: number | null; voltage_v: number | null
   reachable: boolean; last_error: string | null; polled_at: string
+  snmp_status?: string | null
 }
 
 interface Iface {
@@ -32,6 +33,14 @@ interface Iface {
 }
 
 const STALE_MS = 60_000   // no poll for a minute → the agent isn't reporting
+
+// The agent's diagnosis when SNMP doesn't answer (poller/snmp-status.js)
+const SNMP_STATE: Record<string, { label: string; cls: string; color: string; title: string }> = {
+  unreachable: { label: 'SNMP Unreachable',           cls: 'chip-off',  color: 'var(--text3)', title: 'The router can’t be reached from the network the agent is on right now.' },
+  disabled:    { label: 'SNMP Disabled',              cls: 'chip-crit', color: 'var(--crit)',  title: 'SNMP is switched off on the router.' },
+  auth_failed: { label: 'SNMP Authentication Failed', cls: 'chip-warn', color: 'var(--warn)',  title: 'The router is refusing SNMP access.' },
+  timeout:     { label: 'SNMP Timeout',               cls: 'chip-warn', color: 'var(--warn)',  title: 'The router is reachable but didn’t answer SNMP.' },
+}
 
 // ── Formatting ───────────────────────────────────────────────────────────────
 function fmtBps(bps: number | null) {
@@ -106,6 +115,8 @@ function RouterPanel({ r, ifaces, now }: { r: Router; ifaces: Iface[]; now: numb
   const upCount  = rows.filter(i => i.oper_status === 'up' && i.admin_status !== 'down').length
   const totalIn  = rows.reduce((s, i) => s + (i.oper_status === 'up' ? i.in_bps ?? 0 : 0), 0)
   const totalOut = rows.reduce((s, i) => s + (i.oper_status === 'up' ? i.out_bps ?? 0 : 0), 0)
+  // Why SNMP isn't answering (older rows without a diagnosis keep the generic wording)
+  const noAnswer = SNMP_STATE[r.snmp_status ?? ''] ?? { label: 'No SNMP response', cls: 'chip-crit', color: 'var(--crit)', title: '' }
 
   return (
     <div className="card">
@@ -113,7 +124,7 @@ function RouterPanel({ r, ifaces, now }: { r: Router; ifaces: Iface[]; now: numb
         <span>📶 MikroTik Router — {r.identity ?? r.device_name}</span>
         <span className="mono" style={{ fontWeight: 400, color: 'var(--text3)' }}>{r.ip}</span>
         {!r.reachable
-          ? <span className="chip chip-crit">No SNMP response</span>
+          ? <span className={`chip ${noAnswer.cls}`}>{noAnswer.label}</span>
           : stale
             ? <span className="chip chip-warn">Stale — agent not reporting</span>
             : <span className="chip chip-ok">SNMP Detected</span>}
@@ -124,13 +135,20 @@ function RouterPanel({ r, ifaces, now }: { r: Router; ifaces: Iface[]; now: numb
 
       <div className="card-body">
         {!r.reachable && (
-          <div style={{ border: '1px solid var(--crit)', background: 'rgba(248,81,73,.08)', borderRadius: 8, padding: '10px 12px', marginBottom: 14, fontSize: 12, lineHeight: 1.6 }}>
-            {hasData ? (
+          <div style={{ border: `1px solid ${noAnswer.color}`, background: 'var(--surface2)', borderRadius: 8, padding: '10px 12px', marginBottom: 14, fontSize: 12, lineHeight: 1.6 }}>
+            {r.snmp_status && SNMP_STATE[r.snmp_status] ? (
+              // The agent's diagnosis: unreachable / disabled / access refused / timeout
+              <><strong style={{ color: noAnswer.color }}>{noAnswer.title}</strong>{' '}{r.last_error}</>
+            ) : hasData ? (
               <><strong style={{ color: 'var(--crit)' }}>Lost contact with the router.</strong>{' '}
-                It stopped answering SNMP — it may be powered off, unplugged, or its SNMP settings changed.
-                Live status and traffic are hidden until it answers again; values marked &ldquo;last&rdquo; are from the last successful poll.</>
+                It stopped answering SNMP — it may be powered off, unplugged, or its SNMP settings changed.</>
             ) : (
               <><strong style={{ color: 'var(--crit)' }}>The router isn&apos;t answering SNMP.</strong>{' '}{r.last_error}</>
+            )}
+            {hasData && (
+              <div style={{ color: 'var(--text3)' }}>
+                Live status and traffic are hidden until it answers again; values marked &ldquo;last&rdquo; are from the last successful poll.
+              </div>
             )}
           </div>
         )}

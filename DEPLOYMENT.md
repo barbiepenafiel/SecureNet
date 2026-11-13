@@ -38,6 +38,7 @@ Each file is safe to run more than once.
 | File | Purpose |
 |---|---|
 | `supabase/migration_agent_jobs.sql` | **Required.** Request queue for Add Device / Config Backup on the hosted dashboard. |
+| `supabase/migration_snmp_status.sql` | Shows why a device isn't answering SNMP: unreachable, disabled, authentication failed or timeout. |
 | `supabase/migration_agent_watchdog.sql` | Optional. Raises a critical alert if the agent stops reporting for 3 minutes. |
 
 ### 2. Dashboard (Vercel)

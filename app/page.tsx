@@ -16,6 +16,15 @@ function statusChip(s: string) {
   return <span className={`chip ${cls[s] ?? 'chip-off'}`}>{label[s] ?? s}</span>
 }
 
+// SNMP tag in the Device Status table: label + colour per SNMP state
+const SNMP_TAG: Record<string, [string, string]> = {
+  responding:  ['SNMP', 'chip-info'],
+  unreachable: ['SNMP unreachable', 'chip-off'],
+  disabled:    ['SNMP disabled', 'chip-crit'],
+  auth_failed: ['SNMP auth failed', 'chip-warn'],
+  timeout:     ['SNMP timeout', 'chip-warn'],
+}
+
 function PBar({ pct, cls }: { pct: number; cls: string }) {
   return (
     <div className="pbar">
@@ -216,7 +225,12 @@ export default async function DashboardPage() {
                 <tr key={d.id}>
                   <td>
                     <strong>{d.name}</strong>
-                    {answeredSnmp(d) && <span className="chip chip-info" style={{ marginLeft: 8 }}>SNMP</span>}
+                    {answeredSnmp(d) && (() => {
+                      // The agent's SNMP diagnosis, judged from the network it is on right now
+                      const s = d as Device & { snmp_status?: string | null; snmp_detail?: string | null }
+                      const [label, cls] = SNMP_TAG[s.snmp_status ?? ''] ?? ['SNMP', 'chip-info']
+                      return <span className={`chip ${cls}`} style={{ marginLeft: 8 }} title={s.snmp_detail ?? undefined}>{label}</span>
+                    })()}
                   </td>
                   <td><span className="tag">{d.type}</span></td>
                   <td className="mono">{d.ip}</td>

@@ -17,6 +17,7 @@ const dns  = require('dns').promises
 const { exec }      = require('child_process')
 const { promisify } = require('util')
 const snmp = require('net-snmp')
+const st   = require('./snmp-status')
 
 const execAsync = promisify(exec)
 const isWindows = process.platform === 'win32'
@@ -215,6 +216,11 @@ async function probeDevice(ip, community, port = 161) {
   const name = sysName ?? hostname?.split('.')[0] ?? (vendor ? `${vendor} ${ip}` : '')
   const method = ping.ok ? 'ICMP' : mac ? 'ARP' : s.vb ? 'SNMP' : null
 
+  // Why SNMP didn't answer: unreachable / disabled / timeout (see snmp-status.js)
+  const snmpState = s.vb
+    ? { status: 'responding', detail: `Answered SNMP ${s.version} with community "${s.community}".` }
+    : await st.diagnoseNoAnswer({ ip, port, community: communities[0], reachable: ping.ok || !!mac, everAnswered: false })
+
   return {
     ip,
     probedAt: new Date().toISOString(),
@@ -228,6 +234,7 @@ async function probeDevice(ip, community, port = 161) {
       uptime: ticks !== null && Number.isFinite(ticks) ? fmtTicks(ticks) : null,
       location: vbStr(s.vb?.[5]), contact: vbStr(s.vb?.[3]),
       tried: s.tried,
+      status: snmpState.status, detail: snmpState.detail,
     },
     hostname,
     vendor,

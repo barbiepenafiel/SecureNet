@@ -13,11 +13,16 @@ interface Probe {
   icmp: { ok: boolean; latencyMs: number | null; ttl: number | null }
   arp:  { ok: boolean; mac: string | null }
   snmp: { ok: boolean; community: string | null; version: string | null; sysName: string | null; sysDescr: string | null
-          uptime: string | null; location: string | null; tried: string[] }
+          uptime: string | null; location: string | null; tried: string[]; status?: string; detail?: string }
   hostname: string | null; vendor: string | null; model: string | null; firmware: string | null; osHint: string | null
   suggested: { name: string; type: string; method: string | null }
 }
 interface Existing { id: string; name: string; ip: string; type: string; status: string; source: string | null; location: string }
+
+// Why SNMP didn't answer (decided by the agent from its current network)
+const SNMP_LABEL: Record<string, string> = {
+  unreachable: 'Unreachable', disabled: 'SNMP disabled', auth_failed: 'Access refused', timeout: 'Timeout',
+}
 
 function Check({ ok, label, children }: { ok: boolean; label: string; children: React.ReactNode }) {
   return (
@@ -157,7 +162,9 @@ function AddDeviceModal({ onClose }: { onClose: () => void }) {
                 ? <>{probe.snmp.version} · community “{probe.snmp.community}” · {probe.snmp.sysName ?? 'no name'}
                     {probe.snmp.uptime ? ` · up ${probe.snmp.uptime}` : ''}
                     {probe.snmp.sysDescr && <div style={{ color: 'var(--text3)' }}>{probe.snmp.sysDescr.slice(0, 120)}</div>}</>
-                : <>No answer (tried {probe.snmp.tried.join(', ')}). Enable SNMP on the device and allow this server&apos;s IP.</>}
+                : probe.snmp.status && probe.snmp.detail
+                  ? <><strong>{SNMP_LABEL[probe.snmp.status] ?? 'No answer'}</strong> — {probe.snmp.detail} (tried {probe.snmp.tried.join(', ')})</>
+                  : <>No answer (tried {probe.snmp.tried.join(', ')}). Enable SNMP on the device and allow this server&apos;s IP.</>}
             </Check>
             {(probe.model || probe.firmware || probe.hostname) && (
               <div style={{ fontSize: 12, color: 'var(--text2)', borderTop: '1px solid var(--border)', paddingTop: 7 }}>

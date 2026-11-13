@@ -16,8 +16,14 @@
  * the router.
  */
 
+const { exec }      = require('child_process')
+const { promisify } = require('util')
 const os   = require('os')
 const snmp = require('net-snmp')
+const st   = require('./snmp-status')   // reachability check + SNMP status diagnosis
+const mndp = require('./mndp')          // MikroTik discovery broadcasts (is the router connected, and at which address?)
+
+const execAsync = promisify(exec)
 
 const POLL_MS    = parseInt(process.env.MIKROTIK_POLL_MS    ?? '15000', 10)
 const HISTORY_MS = parseInt(process.env.MIKROTIK_HISTORY_MS ?? '60000', 10)
@@ -135,25 +141,107 @@ const looksMikrotik = d =>
   (d.mac && MIKROTIK_OUI.has(d.mac.replace(/[:-]/g, '').slice(0, 6).toUpperCase())) ||
   /mikrotik|routeros|routerboard/i.test(`${d.vendor ?? ''} ${d.model ?? ''} ${d.name ?? ''}`)
 
-// This machine's address on the router's network (for setup hints)
-function agentIpFor(routerIp) {
-  const toInt = ip => ip.split('.').reduce((a, o) => ((a << 8) | Number(o)) >>> 0, 0)
-  for (const list of Object.values(os.networkInterfaces())) {
+// ── Adapting to the network the agent is on right now ────────────────────────
+// A router has several addresses (one per interface). The address stored on
+// its device record is only reachable from some networks, so when it doesn't
+// answer the collector also tries the router's other addresses and the
+// agent's current default gateway — and accepts one only if the serial
+// number proves it is the same router.
+
+// What we already know about each router, from earlier successful polls
+let knownCache = { at: 0, map: new Map() }   // deviceId → { serial, everAnswered, addresses[] }
+async function knownRouters() {
+  if (Date.now() - knownCache.at < 60_000) return knownCache.map
+  const map = new Map()
+  const [r, i] = await Promise.all([
+    db.from('mikrotik_routers').select('device_id, serial, uptime_seconds'),
+    db.from('mikrotik_interfaces').select('device_id, ip_addresses, mac'),
+  ])
+  for (const row of r.data ?? []) {
+    map.set(row.device_id, { serial: row.serial ?? null, everAnswered: row.uptime_seconds !== null || !!row.serial, addresses: [], macs: new Set() })
+  }
+  for (const row of i.data ?? []) {
+    const k = map.get(row.device_id)
+    if (!k) continue
+    for (const a of row.ip_addresses ?? []) k.addresses.push(String(a).split('/')[0])
+    if (row.mac) k.macs.add(String(row.mac).toUpperCase())
+  }
+  if (!r.error) knownCache = { at: Date.now(), map }
+  return map
+}
+
+// Default gateway(s) of the network(s) the agent is connected to now
+let gatewayCache = { at: 0, list: [] }
+async function currentGateways() {
+  if (Date.now() - gatewayCache.at < 30_000) return gatewayCache.list
+  let list = []
+  try {
+    if (process.platform === 'win32') {
+      const { stdout } = await execAsync('route print -4 0.0.0.0', { timeout: 5000, windowsHide: true })
+      list = [...stdout.matchAll(/^\s*0\.0\.0\.0\s+0\.0\.0\.0\s+([\d.]+)\s+[\d.]+\s+\d+/gm)].map(m => m[1])
+    } else {
+      const { stdout } = await execAsync('ip -4 route show default', { timeout: 5000 })
+      list = [...stdout.matchAll(/via ([\d.]+)/g)].map(m => m[1])
+    }
+  } catch { /* no routing information — no extra candidates */ }
+  gatewayCache = { at: Date.now(), list }
+  return list
+}
+
+// Other addresses where this router might answer from the current network
+async function alternateAddresses(dev, known, announced = null) {
+  const own = st.ownAddresses()
+  // First the address the router is announcing right now, then its other known addresses and the gateway
+  const set = new Set([...(announced ? [announced] : []), ...(known?.addresses ?? []), ...(await currentGateways())])
+  set.delete(dev.ip)
+  return [...set].filter(ip => st.IPV4.test(ip) && !own.has(ip)).slice(0, 12)
+}
+
+// This computer's adapter on the same network as `ip` (name), or null
+function adapterFor(ip) {
+  const toInt = a => a.split('.').reduce((n, o) => ((n << 8) | Number(o)) >>> 0, 0)
+  for (const [name, list] of Object.entries(os.networkInterfaces())) {
     for (const a of list ?? []) {
       if (a.family !== 'IPv4' || a.internal || !a.cidr) continue
       const prefix = Number(a.cidr.split('/')[1])
       const mask = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0
-      if (((toInt(a.address) & mask) >>> 0) === ((toInt(routerIp) & mask) >>> 0)) return a.address
+      if (((toInt(a.address) & mask) >>> 0) === ((toInt(ip) & mask) >>> 0)) return name
     }
   }
   return null
 }
 
-function noAnswerHint(dev) {
-  const me = agentIpFor(dev.ip)
-  return `No SNMP response from ${dev.ip}:${dev.snmp_port ?? 161} — enable SNMP on the router, ` +
-    `use community "${dev.snmp_community}" with read access, allow ${me ?? "this agent's IP"} ` +
-    `in the community's addresses, and allow UDP 161 in the router firewall`
+// The router is announcing itself on the cable/Wi-Fi (so it is connected and
+// on), yet ping and SNMP get nothing. Explain why, if the announcement shows it.
+function linkLevelExplanation(seen) {
+  const where = `it is announcing itself from its port ${seen.port ?? '(unknown)'} with address ${seen.ip}`
+  if (st.ownAddresses().has(seen.ip)) {
+    const adapter = adapterFor(seen.ip) ?? 'the adapter it is plugged into'
+    return `The router is connected and powered on (${where}), but that is the same address this computer uses on ${adapter}. ` +
+           `Two devices with the same address cannot exchange ping or SNMP. Change one of them: turn off Internet Connection Sharing on ${adapter} ` +
+           `(or set ${adapter} to obtain its address automatically), or give the router's port a different address.`
+  }
+  if (!adapterFor(seen.ip)) {
+    return `The router is connected and powered on (${where}), but that address is not in any network this computer is on, so ping and SNMP cannot reach it. ` +
+           `Give this computer an address in the router's network (set the adapter to obtain its address automatically), or plug into a router port on a network this computer uses.`
+  }
+  return null
+}
+
+// mikrotik_routers.snmp_status needs supabase/migration_snmp_status.sql;
+// without it the row is saved as before
+let statusColumn = true
+let statusRetryAt = 0
+async function upsertRouter(row, status) {
+  if (statusColumn || Date.now() > statusRetryAt) {
+    const { error } = await db.from('mikrotik_routers').upsert({ ...row, snmp_status: status })
+    if (!error) { statusColumn = true; return null }
+    if (!/snmp_status/.test(error.message)) return error
+    statusColumn = false
+    statusRetryAt = Date.now() + 5 * 60_000
+  }
+  const { error } = await db.from('mikrotik_routers').upsert(row)
+  return error
 }
 
 function tableError(error) {
@@ -302,7 +390,8 @@ async function collect(dev) {
 }
 
 // ── Save ──────────────────────────────────────────────────────────────────────
-async function save(dev, data) {
+// via: the address that answered, when it isn't the one on the device record
+async function save(dev, data, via = null) {
   const ts = new Date().toISOString()
   const { system, interfaces } = data
 
@@ -333,11 +422,14 @@ async function save(dev, data) {
   const name = dev.name
 
   // Live router + interface view
-  const r = await db.from('mikrotik_routers').upsert({
-    device_id: dev.id, device_name: name, ip: dev.ip, ...system,
+  const routerError = await upsertRouter({
+    device_id: dev.id, device_name: name, ip: via ?? dev.ip, ...system,
     reachable: true, last_error: null, polled_at: ts,
-  })
-  if (!tableError(r.error)) {
+  }, 'responding')
+  await st.writeDeviceStatus(db, dev.id, 'responding', via
+    ? `Answering SNMP at ${via}. The address on the device record (${dev.ip}) is not reachable from the agent's current network.`
+    : `Answering SNMP at ${dev.ip}.`)
+  if (!tableError(routerError)) {
     if (interfaces.length) {
       const { error: e } = await db.from('mikrotik_interfaces').upsert(interfaces)
       tableError(e)
@@ -361,20 +453,21 @@ async function save(dev, data) {
       else lastHistory.set(dev.id, Date.now())
     }
     const up = interfaces.filter(i => i.oper_status === 'up').length
-    console.log(`  [mikrotik] ${name} ${dev.ip}: ${system.board ?? 'RouterOS'} ${system.ros_version ?? ''} · cpu ${system.cpu_load ?? '—'}% · mem ${memPct ?? '—'}% · ${interfaces.length} interfaces (${up} up)`)
+    console.log(`  [mikrotik] ${name} ${via ? `${via} (instead of ${dev.ip})` : dev.ip}: ${system.board ?? 'RouterOS'} ${system.ros_version ?? ''} · cpu ${system.cpu_load ?? '—'}% · mem ${memPct ?? '—'}% · ${interfaces.length} interfaces (${up} up)`)
   }
 }
 
-async function saveUnreachable(dev, message) {
+// status: unreachable | disabled | auth_failed | timeout (see snmp-status.js)
+async function saveNoAnswer(dev, status, message) {
   if (lastState.get(dev.id) !== message) {
-    console.log(`  [mikrotik] ${dev.name} ${dev.ip}: ${message}`)
+    console.log(`  [mikrotik] ${dev.name} — ${st.LABEL[status]}: ${message}`)
     lastState.set(dev.id, message)
   }
-  const { error } = await db.from('mikrotik_routers').upsert({
+  tableError(await upsertRouter({
     device_id: dev.id, device_name: dev.name, ip: dev.ip,
     reachable: false, last_error: message, polled_at: new Date().toISOString(),
-  })
-  tableError(error)
+  }, status))
+  await st.writeDeviceStatus(db, dev.id, status, message)
 }
 
 // ── One round ─────────────────────────────────────────────────────────────────
@@ -391,23 +484,82 @@ async function round() {
   const present = new Set(devices.map(d => d.id))
   for (const id of mikrotikIds) if (!present.has(id)) mikrotikIds.delete(id)
 
+  // Routers identified in earlier runs stay known across agent restarts
+  const known = await knownRouters()
+  for (const d of candidates) if (known.get(d.id)?.everAnswered) mikrotikIds.add(d.id)
+
   await Promise.all(candidates.map(async dev => {
     const p = probed.get(dev.id)
     if (!mikrotikIds.has(dev.id) && p && now - p.at < (p.answered ? RECHECK_OTHER_MS : RECHECK_NO_ANSWER_MS)) return
 
-    let data
-    try { data = await collect(dev) } catch (e) { data = null; console.log(`  [mikrotik] ${dev.ip}: ${e.message}`) }
+    const community = dev.snmp_community
+    const port      = dev.snmp_port ?? 161
+    const k         = known.get(dev.id)
+    // Is this router announcing itself on a network the agent is attached to right now?
+    const seen      = k?.macs.size ? mndp.find(k.macs) : null
+
+    // 1. Is the device reachable from the network the agent is on now?
+    //    A ping reply — or, for devices that block ping, one quick SNMP reply.
+    //    Only then is the full SNMP collection attempted.
+    let reachableAt = (await st.ping(dev.ip, 1)) || (await st.quickGet(dev.ip, community, port)) ? dev.ip : null
+    let data = null
+    let via  = null
+    let otherDevice = null   // MAC of a different device using the router's address on this network
+    try {
+      if (reachableAt) data = await collect(dev)
+
+      // Something answered ping at that address but not SNMP. On another
+      // network the same address can belong to a different device — if its
+      // MAC is not one of this router's, the router itself is not reachable.
+      if (reachableAt && !data && k?.macs.size) {
+        const mac = await st.neighborMac(dev.ip)
+        if (mac && !k.macs.has(mac)) { otherDevice = mac; reachableAt = null }
+      }
+
+      // 2. Not answering there: the same router at one of its other addresses
+      //    (or the current gateway), proven by its serial number
+      if (!data && k?.serial) {
+        const alts = await alternateAddresses(dev, k, seen?.ip)
+        const found = await Promise.all(alts.map(async ip => {
+          const vb = await st.quickGet(ip, community, port, [SCALARS.mtxrSerialNumber])
+          return vb && str(vb[0]) === k.serial ? ip : null
+        }))
+        const alt = found.find(Boolean)
+        if (alt) {
+          reachableAt ??= alt
+          const viaAlt = await collect({ ...dev, ip: alt })
+          if (viaAlt && !viaAlt.notMikrotik) { data = viaAlt; via = alt }
+        } else if (!reachableAt) {
+          // No SNMP anywhere — is the router at least reachable at another
+          // address? A ping reply alone proves nothing about WHICH device
+          // answered (any gateway pings), so it only counts when the
+          // address's MAC is one of this router's own interface MACs.
+          const hits = await Promise.all(alts.map(async ip => {
+            if (!(await st.ping(ip, 1))) return null
+            const mac = await st.neighborMac(ip)
+            return mac && k.macs.has(mac) ? ip : null
+          }))
+          reachableAt = hits.find(Boolean) ?? null
+        }
+      }
+    } catch (e) { data = null; console.log(`  [mikrotik] ${dev.ip}: ${e.message}`) }
 
     if (!data) {
       probed.set(dev.id, { answered: false, at: now })
-      // Report it on the dashboard only when it really is a MikroTik.
-      // A router that was answering before has gone silent (off / unplugged);
-      // one that never answered still needs SNMP set up.
-      if (mikrotikIds.has(dev.id)) {
-        await saveUnreachable(dev, `Lost contact — ${dev.ip} stopped answering SNMP (powered off, unplugged, or SNMP settings changed)`)
-      } else if (looksMikrotik(dev)) {
-        await saveUnreachable(dev, noAnswerHint(dev))
+      const everAnswered = mikrotikIds.has(dev.id)
+      // Report it on the dashboard only when it really is a MikroTik
+      if (!everAnswered && !looksMikrotik(dev)) return
+      // Unreachable, SNMP disabled, access refused or timeout — never
+      // "disabled" just because there is no path from this network
+      const diag = await st.diagnoseNoAnswer({ ip: reachableAt ?? dev.ip, port, community, reachable: !!reachableAt, everAnswered })
+      if (otherDevice) {
+        diag.detail = `${dev.ip} is being used by a different device (${otherDevice}) on the network the agent is on now, so the router itself cannot be reached from here. ` +
+                      `This says nothing about whether SNMP is enabled on the router.`
       }
+      // Connected at link level but no IP path (address clash / different subnet)
+      const why = seen && !reachableAt ? linkLevelExplanation(seen) : null
+      if (why) { diag.status = 'unreachable'; diag.detail = why }
+      await saveNoAnswer(dev, diag.status, diag.detail)
       return
     }
     if (data.notMikrotik) {
@@ -417,11 +569,14 @@ async function round() {
     }
     mikrotikIds.add(dev.id)
     probed.set(dev.id, { answered: true, at: now })
-    if (lastState.get(dev.id) !== 'ok') {
-      console.log(`  [mikrotik] connected to ${dev.ip} over SNMP (${data.system.description ?? 'RouterOS'})`)
-      lastState.set(dev.id, 'ok')
+    const state = `ok ${via ?? dev.ip}`
+    if (lastState.get(dev.id) !== state) {
+      console.log(via
+        ? `  [mikrotik] ${dev.name}: ${dev.ip} is not reachable from this network — connected at ${via} instead (same router, serial ${k.serial})`
+        : `  [mikrotik] connected to ${dev.ip} over SNMP (${data.system.description ?? 'RouterOS'})`)
+      lastState.set(dev.id, state)
     }
-    await save(dev, data)
+    await save(dev, data, via)
   }))
 }
 
@@ -429,6 +584,7 @@ async function round() {
 // isActive: () => boolean — false while this agent is standing by for another one
 function start(supabase, isActive = () => true) {
   db = supabase
+  mndp.start()
   const loop = async () => {
     const started = Date.now()
     try { if (isActive()) await round() } catch (e) { console.log(`  [mikrotik] round failed: ${e.message}`) }
