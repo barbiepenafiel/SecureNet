@@ -28,7 +28,6 @@ const NAV_GROUPS = [
   {
     label: 'Operations',
     items: [
-      { href: '/lifecycle', icon: '⟳', label: 'Lifecycle'    },
       { href: '/config',    icon: '◫', label: 'Config Backup' },
       { href: '/reports',   icon: '◧', label: 'Reports'       },
     ],

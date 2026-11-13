@@ -814,8 +814,16 @@ export default function TopologyHub({ devs, clientCounts = {}, mode, initialBldg
                 </div>
               </div>
             )
+            // Only the networks this computer is connected to right now: a
+            // network counts when the agent sees a device on it directly
+            // (Online / Warning by ICMP or ARP — only possible on a network it
+            // is on). All their devices are shown, offline ones included; other
+            // networks are hidden and reappear when you connect to them again.
+            // Picking a status in the filter still shows every device with it.
+            const netOf = (d: Device) => d.ip.split('.').slice(0, 3).join('.')
+            const liveNets = new Set(allTree.filter(isLive).map(netOf))
             const treeDevs = allTree.filter(d =>
-              (statusFilter === 'all' || d.status === statusFilter) &&
+              (statusFilter === 'all' ? liveNets.has(netOf(d)) : d.status === statusFilter) &&
               (typeFilter   === 'all' || d.type   === typeFilter) &&
               (bldgFilter   === 'all' || d.location === bldgFilter)
             )
@@ -827,12 +835,12 @@ export default function TopologyHub({ devs, clientCounts = {}, mode, initialBldg
               ['Offline',     count(d => d.status === 'down'), '#dc2626'],
               ['Unknown',     count(d => d.status === 'unknown'), '#94a3b8'],
             ]
-            const networks = new Set(allTree.map(d => d.ip.split('.').slice(0, 3).join('.'))).size
+            const networks = new Set(treeDevs.map(d => d.ip.split('.').slice(0, 3).join('.'))).size
             return (
               <div>
                 {/* Tree toolbar */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', background: '#f8fafc', borderBottom: '1px solid var(--border)', fontSize: 12, flexWrap: 'wrap' }}>
-                  <strong style={{ color: 'var(--text)' }}>{allTree.length} devices</strong>
+                  <strong style={{ color: 'var(--text)' }}>{treeDevs.length} devices</strong>
                   <span style={{ color: 'var(--text3)' }}>on {networks} network{networks === 1 ? '' : 's'}</span>
                   <span style={{ width: 1, height: 16, background: 'var(--border)', margin: '0 4px' }}/>
                   {chips.filter(([, n]) => n > 0).map(([label, n, color]) => (
