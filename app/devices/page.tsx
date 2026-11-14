@@ -5,6 +5,7 @@ import { supabase } from '@/lib/supabase'
 import Modal from '@/components/Modal'
 import { useAuth } from '@/components/AuthProvider'
 import type { AgentStatus, Device, ScanResult } from '@/lib/database.types'
+import { useBuildings, locationOptions } from '@/lib/buildings'
 
 type SourceFilter = 'all' | 'managed' | 'discovered'
 type StatusFilter = 'all' | 'up' | 'warn' | 'down' | 'maint' | 'unreachable' | 'unknown' | 'attention'
@@ -110,6 +111,7 @@ function needsAttention(d: Device) {
 function EditDeviceModal({ device, onClose, onSaved }: {
   device: Device; onClose: () => void; onSaved: () => void
 }) {
+  const { names: buildingNames } = useBuildings()
   const [form, setForm] = useState({
     name: device.name, type: device.type,
     ip: device.ip, location: device.location, status: device.status,
@@ -158,7 +160,7 @@ function EditDeviceModal({ device, onClose, onSaved }: {
         <div className="form-group">
           <label className="form-label">Location</label>
           <select suppressHydrationWarning className="form-select" value={form.location} onChange={set('location')}>
-            {[...new Set(['Unassigned','Building A','Building B','Building C','Data Center','Library','Admin Building', device.location])].map(l => (
+            {locationOptions(buildingNames, device.location).map(l => (
               <option key={l}>{l}</option>
             ))}
           </select>
@@ -192,6 +194,7 @@ function EditDeviceModal({ device, onClose, onSaved }: {
 function AddDiscoveredModal({ scan, onClose, onSaved }: {
   scan: ScanResult; onClose: () => void; onSaved: () => void
 }) {
+  const { names: buildingNames } = useBuildings()
   const [form, setForm] = useState({
     // Type from the scan's MAC-vendor lookup; location stays unassigned until someone sets it
     name: scan.hostname ?? '', type: scan.device_type ?? 'Client',
@@ -248,7 +251,7 @@ function AddDiscoveredModal({ scan, onClose, onSaved }: {
         <div className="form-group">
           <label className="form-label">Location</label>
           <select suppressHydrationWarning className="form-select" value={form.location} onChange={set('location')}>
-            {['Unassigned','Building A','Building B','Building C','Data Center','Library','Admin Building'].map(l => (
+            {locationOptions(buildingNames).map(l => (
               <option key={l}>{l}</option>
             ))}
           </select>
@@ -259,6 +262,7 @@ function AddDiscoveredModal({ scan, onClose, onSaved }: {
 }
 
 export default function DevicesPage() {
+  const { names: buildingNames } = useBuildings()
   const [devices,     setDevices]   = useState<Device[]>([])
   const [search,      setSearch]    = useState('')
   const [typeF,       setTypeF]     = useState('')
@@ -404,7 +408,7 @@ export default function DevicesPage() {
   }
 
   const deviceTypes = [...new Set(['Router','Switch','Access Point','Server','Firewall', ...devices.map(d => d.type)])]
-  const locations   = [...new Set(['Building A','Building B','Building C','Data Center', ...devices.map(d => d.location).filter(l => !isUnassigned(l))])]
+  const locations   = [...new Set([...buildingNames, ...devices.map(d => d.location).filter(l => !isUnassigned(l))])]
   const onlineCount = periodDevices.filter(d => shownStatus(d) === 'up' || shownStatus(d) === 'warn').length
 
   const attentionCount = periodDevices.filter(needsAttention).length

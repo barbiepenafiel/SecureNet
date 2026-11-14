@@ -205,8 +205,10 @@ export default function AlertsPage() {
   })
 
   // Newest first
-  const visible = [...filtered].sort((a, b) =>
-    new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+  // Most recent activity first: when it was resolved, otherwise when it was raised —
+  // so an alert you just resolved moves to the top
+  const lastActivity = (a: Alert) => new Date(a.resolved_at ?? a.created_at).getTime()
+  const visible = [...filtered].sort((a, b) => lastActivity(b) - lastActivity(a))
 
   const counts = {
     all:      periodAlerts.length,
@@ -293,10 +295,25 @@ export default function AlertsPage() {
               {a.root_cause && (
                 <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 6 }}>{a.root_cause}</div>
               )}
-              {a.resolved_at && (
+              {/* Small one line in the other tabs; the larger box only in the Resolved tab */}
+              {a.resolved_at && tab !== 'resolved' && (
                 <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 4 }}>
                   ✓ Resolved by <strong>{a.resolved_by}</strong> on {new Date(a.resolved_at).toLocaleString()}
                   {a.resolution_notes && <> — <em>{a.resolution_notes}</em></>}
+                </div>
+              )}
+              {a.resolved_at && tab === 'resolved' && (
+                <div style={{
+                  display: 'inline-flex', alignItems: 'flex-start', gap: 8, marginTop: 8, padding: '7px 12px',
+                  fontSize: 13, color: 'var(--text)', background: 'rgba(22,163,74,.08)',
+                  border: '1px solid rgba(22,163,74,.28)', borderLeft: '3px solid var(--ok)', borderRadius: 6,
+                }}>
+                  <span style={{ color: 'var(--ok)', fontWeight: 700 }}>✓</span>
+                  <span>
+                    <strong style={{ color: 'var(--ok)' }}>Resolved</strong> by <strong>{a.resolved_by}</strong>
+                    <span style={{ color: 'var(--text3)' }}> · {new Date(a.resolved_at).toLocaleString()}</span>
+                    {a.resolution_notes && <span style={{ display: 'block', marginTop: 2, color: 'var(--text2)' }}>{a.resolution_notes}</span>}
+                  </span>
                 </div>
               )}
             </div>

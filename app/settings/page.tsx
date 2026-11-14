@@ -6,6 +6,7 @@ import Modal from '@/components/Modal'
 import type { AlertConfig } from '@/lib/database.types'
 import { useAuth } from '@/components/AuthProvider'
 import ManageSection from '@/components/ManageSection'
+import { useBuildings } from '@/lib/buildings'
 import { ROLE_LABEL, type Profile, type Role } from '@/lib/roles'
 
 type SettingsTab = 'notif' | 'roles' | 'manage' | 'maint'
@@ -89,9 +90,9 @@ function RecipientsPanel() {
   )
 }
 
-const BUILDINGS = ['All sites', 'Building A', 'Building B', 'Building C']
 
 function AddUserModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
+  const { names: buildingNames } = useBuildings()
   const [form, setForm] = useState({ full_name: '', email: '', password: '', role: 'it_staff' as Role, building_access: 'All sites' })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -127,7 +128,7 @@ function AddUserModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
         </div>
         <div className="form-group"><label className="form-label">Building Access</label>
           <select suppressHydrationWarning className="form-select" value={form.building_access} onChange={set('building_access')}>
-            {BUILDINGS.map(b => <option key={b}>{b}</option>)}
+            {['All sites', ...buildingNames].map(b => <option key={b}>{b}</option>)}
           </select>
         </div>
       </div>
@@ -155,6 +156,7 @@ function timeAgo(iso: string | null) {
 }
 
 function UsersPanel() {
+  const { names: buildingNames } = useBuildings()
   const { profile: me } = useAuth()
   const [users, setUsers] = useState<Profile[]>([])
   const [loading, setLoading] = useState(true)
@@ -217,7 +219,7 @@ function UsersPanel() {
                   <td>
                     <select suppressHydrationWarning className="form-select" style={{ width: 'auto', padding: '3px 6px', fontSize: 12 }}
                       value={u.building_access} onChange={e => update(u.id, { building_access: e.target.value })}>
-                      {BUILDINGS.map(b => <option key={b}>{b}</option>)}
+                      {[...new Set(['All sites', ...buildingNames, u.building_access])].map(b => <option key={b}>{b}</option>)}
                     </select>
                   </td>
                   <td style={{ fontSize: 12, color: 'var(--text3)' }}>{timeAgo(u.last_login)}</td>

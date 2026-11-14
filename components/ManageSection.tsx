@@ -4,10 +4,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '@/lib/supabase'
 import type { Device } from '@/lib/database.types'
 import {
-  useFloorRooms, useFloorPlans, roomOfDevice, allSheets, roomsOfSheet, sheetsForLocation, roomsForLocation, floorLabel,
+  useFloorRooms, useFloorPlans, roomOfDevice, FLOORPLAN_BUILDING, allSheets, roomsOfSheet, sheetsForLocation, roomsForLocation, floorLabel,
   type FloorRoom, type FloorPlan,
 } from '@/lib/floor-rooms'
 import { RoomLabel, SheetBackground } from '@/components/TopologyHub'
+import { useBuildings, type Building } from '@/lib/buildings'
 
 // Settings → Manage: device details and floor plans / rooms (Network Admins only)
 
@@ -17,10 +18,9 @@ const STATUS: Record<string, { label: string; cls: string }> = {
   unknown: { label: 'Unknown', cls: 'chip-off' }, maint: { label: 'Maintenance', cls: 'chip-maint' },
 }
 const TYPES = ['Router', 'Switch', 'Access Point', 'Firewall', 'Server', 'Computer', 'Client']
-const BUILDINGS = ['Building A', 'Building B', 'Building C', 'Data Center', 'Library', 'Admin Building']
 
 export default function ManageSection() {
-  const [part, setPart] = useState<'devices' | 'rooms'>('devices')
+  const [part, setPart] = useState<'devices' | 'buildings' | 'rooms'>('devices')
   const { rooms, managed, reload } = useFloorRooms()
   const { plans } = useFloorPlans()
 
@@ -28,7 +28,7 @@ export default function ManageSection() {
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', gap: 2, padding: 3, background: 'var(--surface3)', borderRadius: 8 }}>
-          {([['devices', 'Devices'], ['rooms', 'Floor plans']] as const).map(([k, l]) => (
+          {([['devices', 'Devices'], ['buildings', 'Buildings'], ['rooms', 'Floor plans']] as const).map(([k, l]) => (
             <button suppressHydrationWarning key={k} onClick={() => setPart(k)} style={{
               padding: '6px 16px', borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: 'pointer', border: 'none',
               background: part === k ? 'var(--surface)' : 'transparent', color: part === k ? 'var(--accent2)' : 'var(--text2)',
@@ -43,6 +43,7 @@ export default function ManageSection() {
         )}
       </div>
       {part === 'devices' && <DevicesManager rooms={rooms} roomsManaged={managed} plans={plans}/>}
+      {part === 'buildings' && <BuildingsManager/>}
       {part === 'rooms'   && <RoomsManager rooms={rooms} managed={managed} reload={reload}/>}
     </div>
   )
@@ -55,6 +56,7 @@ type Draft = { name: string; type: string; location: string; room_id: string; ma
 
 function DevicesManager({ rooms, roomsManaged, plans }: { rooms: FloorRoom[]; roomsManaged: boolean; plans: FloorPlan[] }) {
   const [devices, setDevices] = useState<Device[]>([])
+  const { names: buildingNames } = useBuildings()
   const [drafts, setDrafts] = useState<Record<string, Draft>>({})
   const [busy, setBusy] = useState<string | null>(null)
   const [msg, setMsg] = useState<{ id: string; text: string; ok: boolean } | null>(null)
@@ -118,7 +120,7 @@ function DevicesManager({ rooms, roomsManaged, plans }: { rooms: FloorRoom[]; ro
   }
 
   const locations = useMemo(() =>
-    [...new Set(['Unassigned', ...BUILDINGS, ...plans.map(p => p.building), ...devices.map(d => d.location).filter(Boolean)])], [devices, plans])
+    [...new Set(['Unassigned', ...buildingNames, ...plans.map(p => p.building), ...devices.map(d => d.location).filter(Boolean)])], [devices, plans, buildingNames])
   const shown = devices.filter(d => !q || [d.name, d.ip, d.mac, d.location, d.type].filter(Boolean).join(' ').toLowerCase().includes(q.toLowerCase()))
   const roomName = (d: Device) => roomOfDevice(d, roomsForLocation(d.location, rooms, plans))?.label
   // parent_* columns installed (supabase/migration_objectives.sql)?
@@ -408,13 +410,14 @@ function AddPlanModal({ plans, onClose, onSaved }: { plans: FloorPlan[]; onClose
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [known, setKnown] = useState<string[]>([])
+  const { names: buildingNames } = useBuildings()
 
   useEffect(() => {
     supabase.from('devices').select('location').then(({ data }) => {
       const locs = (data ?? []).map((d: { location: string }) => d.location).filter(l => l && l !== 'Unassigned')
-      setKnown([...new Set([...locs, ...BUILDINGS, ...plans.map(p => p.building)])].sort())
+      setKnown([...new Set([...locs, ...buildingNames, ...plans.map(p => p.building)])].sort())
     })
-  }, [plans])
+  }, [plans, buildingNames])
   useEffect(() => () => { if (preview) URL.revokeObjectURL(preview.url) }, [preview])
 
   function pick(f: File | null) {
@@ -490,6 +493,125 @@ function AddPlanModal({ plans, onClose, onSaved }: { plans: FloorPlan[]; onClose
           </div>
           <div style={{ fontSize: 11.5, color: 'var(--text3)' }}>After adding, press “+ Add room” and place each room name on the drawing.</div>
         </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Buildings ────────────────────────────────────────────────────────────────
+// The names in every Building / Location dropdown. Renaming also moves the
+// devices, floor plans, rooms and users that used the old name (/api/buildings).
+
+function BuildingsManager() {
+  const { buildings, managed, reload } = useBuildings()
+  const [counts, setCounts] = useState<Record<string, number>>({})
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const [newName, setNewName] = useState('')
+  const [busy, setBusy] = useState<string | null>(null)
+  const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null)
+
+  const loadCounts = useCallback(async () => {
+    const { data } = await supabase.from('devices').select('location')
+    const c: Record<string, number> = {}
+    for (const d of (data ?? []) as { location: string }[]) c[d.location] = (c[d.location] ?? 0) + 1
+    setCounts(c)
+  }, [])
+  useEffect(() => { loadCounts() }, [loadCounts, buildings])
+
+  const flash = (text: string, ok: boolean) => { setMsg({ text, ok }); setTimeout(() => setMsg(null), 5000) }
+
+  async function call(method: string, body?: object, query = '') {
+    const res = await fetch(`/api/buildings${query}`, {
+      method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined,
+    })
+    const d = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(d.error ?? 'Request failed')
+    return d
+  }
+
+  async function add() {
+    const name = newName.trim()
+    if (!name) return
+    setBusy('new')
+    try { await call('POST', { name }); setNewName(''); flash(`Added ${name}`, true); reload() }
+    catch (e) { flash((e as Error).message, false) }
+    setBusy(null)
+  }
+
+  async function rename(b: Building) {
+    const name = (drafts[b.id] ?? b.name).trim()
+    if (!name || name === b.name) return
+    const n = counts[b.name] ?? 0
+    // The IC Building's built-in floor drawings follow names like "IC Building" / "Building A"
+    const loses = FLOORPLAN_BUILDING.test(b.name) && !FLOORPLAN_BUILDING.test(name)
+    if (!confirm(`Rename "${b.name}" to "${name}"?${n ? ` Its ${n} device(s) move with it.` : ''}${loses ? '\n\nNote: the built-in IC Building floor drawings only show for names containing "IC Building" (or "Building A") — upload a floor plan for the new name under Floor plans.' : ''}`)) return
+    setBusy(b.id)
+    try {
+      await call('PATCH', { id: b.id, name })
+      setDrafts(p => { const x = { ...p }; delete x[b.id]; return x })
+      flash(`Renamed ${b.name} to ${name}`, true); reload()
+    } catch (e) { flash((e as Error).message, false) }
+    setBusy(null)
+  }
+
+  async function remove(b: Building) {
+    const n = counts[b.name] ?? 0
+    if (!confirm(`Delete "${b.name}"?${n ? ` Its ${n} device(s) become Unassigned.` : ''}`)) return
+    setBusy(b.id)
+    try { await call('DELETE', undefined, `?id=${encodeURIComponent(b.id)}`); flash(`Deleted ${b.name}`, true); reload() }
+    catch (e) { flash((e as Error).message, false) }
+    setBusy(null)
+  }
+
+  if (!managed) return (
+    <div className="card"><div className="card-body" style={{ fontSize: 13, color: 'var(--text2)' }}>
+      To add and rename buildings, run <span className="mono">supabase/migration_buildings.sql</span> in the Supabase SQL Editor.
+      Until then the built-in names (Building A, B, C, Data Center, Library, Admin Building) are used.
+    </div></div>
+  )
+
+  return (
+    <div className="card" style={{ maxWidth: 760 }}>
+      <div className="card-header">
+        Buildings
+        <span style={{ fontWeight: 400, fontSize: 12, color: 'var(--text3)' }}>Names used in every Building / Location list</span>
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table className="tbl">
+          <thead><tr><th>Name</th><th>Devices</th><th></th></tr></thead>
+          <tbody>
+            {buildings.map(b => {
+              const draft = drafts[b.id] ?? b.name
+              const changed = draft.trim() !== b.name && !!draft.trim()
+              return (
+                <tr key={b.id} style={changed ? { background: 'rgba(22,163,74,.05)' } : undefined}>
+                  <td style={{ minWidth: 240 }}>
+                    <input suppressHydrationWarning className="form-input" value={draft} maxLength={60}
+                      onChange={e => setDrafts(p => ({ ...p, [b.id]: e.target.value }))}
+                      onKeyDown={e => { if (e.key === 'Enter') rename(b) }}/>
+                  </td>
+                  <td style={{ color: 'var(--text2)' }}>{counts[b.name] ?? 0}</td>
+                  <td style={{ whiteSpace: 'nowrap', textAlign: 'right' }}>
+                    <button suppressHydrationWarning className="btn btn-sm btn-primary" disabled={!changed || busy === b.id} onClick={() => rename(b)}>
+                      {busy === b.id ? 'Saving…' : 'Rename'}
+                    </button>{' '}
+                    <button suppressHydrationWarning className="btn btn-sm" style={{ color: 'var(--crit)' }} disabled={busy === b.id} onClick={() => remove(b)}>Delete</button>
+                  </td>
+                </tr>
+              )
+            })}
+            {!buildings.length && <tr><td colSpan={3} style={{ textAlign: 'center', padding: 20, color: 'var(--text3)' }}>No buildings yet.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ display: 'flex', gap: 8, padding: '12px 16px', borderTop: '1px solid var(--border)', flexWrap: 'wrap', alignItems: 'center' }}>
+        <input suppressHydrationWarning className="form-input" style={{ flex: '1 1 220px' }} placeholder="New building name" maxLength={60}
+          value={newName} onChange={e => setNewName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') add() }}/>
+        <button suppressHydrationWarning className="btn btn-primary" disabled={!newName.trim() || busy === 'new'} onClick={add}>+ Add building</button>
+        {msg && <span style={{ fontSize: 12.5, color: msg.ok ? 'var(--ok)' : 'var(--crit)' }}>{msg.text}</span>}
+      </div>
+      <div style={{ padding: '0 16px 12px', fontSize: 11.5, color: 'var(--text3)' }}>
+        Renaming moves its devices, floor plans, rooms and users&apos; building access to the new name. Deleting sets its devices to Unassigned.
       </div>
     </div>
   )

@@ -3,10 +3,10 @@
 import { useState } from 'react'
 import Modal from './Modal'
 import { supabase } from '@/lib/supabase'
+import { useBuildings, locationOptions } from '@/lib/buildings'
 
 // ── Add Device (verified live: ICMP · ARP · SNMP) ─────────
 const DEVICE_TYPES = ['Router', 'Switch', 'Access Point', 'Firewall', 'Server', 'Computer', 'Client']
-const LOCATIONS    = ['Unassigned', 'Building A', 'Building B', 'Building C', 'Data Center', 'Library', 'Admin Building']
 
 interface Probe {
   ip: string; reachable: boolean; localNetwork: boolean
@@ -35,6 +35,7 @@ function Check({ ok, label, children }: { ok: boolean; label: string; children: 
 }
 
 function AddDeviceModal({ onClose }: { onClose: () => void }) {
+  const { names: buildingNames } = useBuildings()
   const [target,   setTarget]   = useState({ ip: '', community: '', port: '161' })
   const [form,     setForm]     = useState({ name: '', type: 'Client', location: 'Unassigned' })
   const [probe,    setProbe]    = useState<Probe | null>(null)
@@ -206,7 +207,7 @@ function AddDeviceModal({ onClose }: { onClose: () => void }) {
           <div className="form-group">
             <label className="form-label">Location</label>
             <select suppressHydrationWarning className="form-select" value={form.location} onChange={setF('location')}>
-              {[...new Set([...LOCATIONS, form.location])].map(l => <option key={l}>{l}</option>)}
+              {locationOptions(buildingNames, form.location).map(l => <option key={l}>{l}</option>)}
             </select>
           </div>
         </>
