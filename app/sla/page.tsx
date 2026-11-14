@@ -58,6 +58,12 @@ function computeSLA(devices: Device[], events: StatusEvent[]): ComputedSLA[] {
       .filter(e => e.device_id === dev.id)
       .sort((a, b) => new Date(a.changed_at).getTime() - new Date(b.changed_at).getTime())
 
+    // Only the time the device has actually been monitored counts — not the
+    // whole 30 days for a device first seen yesterday
+    const firstSeen = Date.parse(dev.first_seen ?? dev.created_at ?? '') || since
+    const windowStart = Math.max(since, firstSeen)
+    const windowMs = Math.max(1, now - windowStart)
+
     // --- Calculate total downtime ---
     let downtimeMs = 0
     let downStart: number | null = null
@@ -65,7 +71,7 @@ function computeSLA(devices: Device[], events: StatusEvent[]): ComputedSLA[] {
     for (const evt of devEvents) {
       const ts = new Date(evt.changed_at).getTime()
       if (evt.new_status === 'down' && downStart === null) {
-        downStart = Math.max(ts, since)
+        downStart = Math.max(ts, windowStart)
       } else if (evt.new_status !== 'down' && downStart !== null) {
         downtimeMs += ts - downStart
         downStart = null
@@ -73,16 +79,20 @@ function computeSLA(devices: Device[], events: StatusEvent[]): ComputedSLA[] {
     }
     // Still down now
     if (downStart !== null) downtimeMs += now - downStart
-    // If device is currently down but no events recorded yet, treat as down from last check (~30s ago)
-    if (dev.status === 'down' && downStart === null) downtimeMs += 30_000
+    // Down with no recorded change (e.g. it went down before the period):
+    // down since it was last seen answering
+    if (dev.status === 'down' && downStart === null) {
+      const lastSeen = Date.parse(dev.last_seen ?? '') || windowStart
+      downtimeMs += now - Math.max(lastSeen, windowStart)
+    }
 
-    downtimeMs = Math.max(0, Math.min(downtimeMs, PERIOD_MS))
+    downtimeMs = Math.max(0, Math.min(downtimeMs, windowMs))
 
     // --- Count incidents (down transitions in period) ---
     const incidents = devEvents.filter(e => e.new_status === 'down').length
 
-    // --- Uptime % ---
-    const uptimePct = parseFloat((((PERIOD_MS - downtimeMs) / PERIOD_MS) * 100).toFixed(2))
+    // --- Uptime % (of the monitored time) ---
+    const uptimePct = parseFloat((((windowMs - downtimeMs) / windowMs) * 100).toFixed(2))
 
     // --- Per-day map (last 30 days, index 0 = oldest) ---
     const dayMap = Array.from({ length: 30 }, (_, dayIdx) => {
@@ -127,16 +137,20 @@ export default function SlaPage() {
   const load = useCallback(async () => {
     const since30d = new Date(Date.now() - PERIOD_MS).toISOString()
 
-    const [{ data: devData }, { data: evtData }] = await Promise.all([
-      supabase.from('devices').select('id, name, type, location, status').neq('status', 'maint'),
-      supabase.from('status_events')
+    const { data: devData } = await supabase.from('devices')
+      .select('id, name, type, location, status, first_seen, last_seen, created_at').neq('status', 'maint')
+    // Every status change in the period (one request returns at most 1000 rows)
+    const events: StatusEvent[] = []
+    for (let from = 0; from < 50_000; from += 1000) {
+      const { data } = await supabase.from('status_events')
         .select('device_id, new_status, old_status, changed_at')
         .gte('changed_at', since30d)
-        .order('changed_at', { ascending: true }),
-    ])
+        .order('changed_at', { ascending: true }).range(from, from + 999)
+      events.push(...((data ?? []) as StatusEvent[]))
+      if (!data || data.length < 1000) break
+    }
 
     const devices = (devData ?? []) as Device[]
-    const events  = (evtData ?? []) as StatusEvent[]
 
     setRows(computeSLA(devices, events))
     setLastUp(new Date().toLocaleTimeString())

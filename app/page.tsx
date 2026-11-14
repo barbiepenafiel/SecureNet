@@ -8,7 +8,7 @@ import DiscoveredKpi from '@/components/DiscoveredKpi'
 import LiveRefresh from '@/components/LiveRefresh'
 
 const LIVE_TABLES = ['devices', 'alerts']
-import type { Device, SlaRecord, Client } from '@/lib/database.types'
+import type { Device, Client } from '@/lib/database.types'
 
 function statusChip(s: string) {
   const cls: Record<string, string>   = { up: 'chip-ok', warn: 'chip-warn', down: 'chip-crit', maint: 'chip-maint', unreachable: 'chip-off', unknown: 'chip-off' }
@@ -47,16 +47,13 @@ export default async function DashboardPage() {
 
   const [
     { data: devices },
-    { data: sla },
     { data: clientRows },
   ] = await Promise.all([
     db.from('devices').select('*').order('name'),
-    db.from('sla_data').select('*').order('device_name'),
     db.from('clients').select('hostname, ap, status'),
   ])
 
   const devs    = (devices    ?? []) as Device[]
-  const slaL    = (sla        ?? []) as SlaRecord[]
   const clientsL = (clientRows ?? []) as Pick<Client, 'hostname' | 'ap' | 'status'>[]
   // Real metrics derived from live data
   const onlineClients = clientsL.filter(c => c.status !== 'down').length
@@ -86,20 +83,6 @@ export default async function DashboardPage() {
   const down = devs.filter(d => d.status === 'down').length
   const total = devs.length
 
-  const avgSla = slaL.length
-    ? (slaL.reduce((s, r) => s + Number(r.uptime_pct), 0) / slaL.length).toFixed(1)
-    : '—'
-
-  // SLA by building
-  const bldgSla: Record<string, number[]> = {}
-  slaL.forEach(r => {
-    if (!bldgSla[r.building]) bldgSla[r.building] = []
-    bldgSla[r.building].push(Number(r.uptime_pct))
-  })
-  const bldgAvg = Object.entries(bldgSla).map(([b, vals]) => ({
-    bldg: b,
-    pct: vals.reduce((s, v) => s + v, 0) / vals.length,
-  }))
 
   return (
     <>

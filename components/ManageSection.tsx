@@ -49,7 +49,8 @@ export default function ManageSection() {
 
 // ─── Devices ──────────────────────────────────────────────────────────────────
 
-type Draft = { name: string; type: string; location: string; room_id: string; maint: boolean }
+// parent: '' = learned automatically by the agent, otherwise a device id (set by hand)
+type Draft = { name: string; type: string; location: string; room_id: string; maint: boolean; parent: string }
 
 function DevicesManager({ rooms, roomsManaged }: { rooms: FloorRoom[]; roomsManaged: boolean }) {
   const [devices, setDevices] = useState<Device[]>([])
@@ -67,12 +68,14 @@ function DevicesManager({ rooms, roomsManaged }: { rooms: FloorRoom[]; roomsMana
   const draftOf = (d: Device): Draft => drafts[d.id] ?? {
     name: d.name, type: d.type, location: d.location || 'Unassigned',
     room_id: d.room_id ?? '', maint: d.status === 'maint',
+    parent: d.parent_source === 'manual' ? d.parent_id ?? '' : '',
   }
   const edit = (d: Device, patch: Partial<Draft>) => setDrafts(p => ({ ...p, [d.id]: { ...draftOf(d), ...patch } }))
   const dirty = (d: Device) => {
     const x = drafts[d.id]
     return !!x && (x.name !== d.name || x.type !== d.type || x.location !== (d.location || 'Unassigned')
-      || x.room_id !== (d.room_id ?? '') || x.maint !== (d.status === 'maint'))
+      || x.room_id !== (d.room_id ?? '') || x.maint !== (d.status === 'maint')
+      || x.parent !== (d.parent_source === 'manual' ? d.parent_id ?? '' : ''))
   }
 
   async function save(d: Device) {
@@ -83,6 +86,12 @@ function DevicesManager({ rooms, roomsManaged }: { rooms: FloorRoom[]; roomsMana
     // Room only applies inside the floor-plan building
     if (roomsManaged) patch.room_id = FLOORPLAN_BUILDING.test(x.location) && x.room_id ? x.room_id : null
     if (x.maint !== (d.status === 'maint')) patch.status = x.maint ? 'maint' : 'unknown'   // the agent re-checks it
+    // Topology link: a device chosen by hand is kept; Automatic hands it back to the agent
+    if (linksManaged && x.parent !== (d.parent_source === 'manual' ? d.parent_id ?? '' : '')) {
+      Object.assign(patch, x.parent
+        ? { parent_id: x.parent, parent_port: null, parent_source: 'manual', parent_updated_at: new Date().toISOString() }
+        : { parent_id: null, parent_port: null, parent_source: null, parent_updated_at: new Date().toISOString() })
+    }
     const { error } = await supabase.from('devices').update(patch).eq('id', d.id)
     setBusy(null)
     if (error) {
@@ -111,6 +120,17 @@ function DevicesManager({ rooms, roomsManaged }: { rooms: FloorRoom[]; roomsMana
     [...new Set(['Unassigned', ...BUILDINGS, ...devices.map(d => d.location).filter(Boolean)])], [devices])
   const shown = devices.filter(d => !q || [d.name, d.ip, d.mac, d.location, d.type].filter(Boolean).join(' ').toLowerCase().includes(q.toLowerCase()))
   const roomName = (d: Device) => roomOfDevice(d, rooms)?.label
+  // parent_* columns installed (supabase/migration_objectives.sql)?
+  const linksManaged = devices.length > 0 && 'parent_id' in devices[0]
+  const byId = useMemo(() => new Map(devices.map(d => [d.id, d])), [devices])
+  // Devices below this one can't be chosen as what it connects to (no loops)
+  const descendants = (id: string) => {
+    const out = new Set<string>([id])
+    let grew = true
+    while (grew) { grew = false; for (const d of devices) if (d.parent_id && out.has(d.parent_id) && !out.has(d.id)) { out.add(d.id); grew = true } }
+    return out
+  }
+  const SOURCE_LABEL: Record<string, string> = { snmp: 'router table', gateway: 'same network as gateway' }
 
   return (
     <div className="card">
@@ -124,7 +144,7 @@ function DevicesManager({ rooms, roomsManaged }: { rooms: FloorRoom[]; roomsMana
       <div style={{ overflowX: 'auto' }}>
         <table className="tbl">
           <thead>
-            <tr><th>Name</th><th>Type</th><th>Building</th><th>Room</th><th>IP / MAC</th><th>Status</th><th>Monitoring</th><th></th></tr>
+            <tr><th>Name</th><th>Type</th><th>Building</th><th>Room</th><th>Connected to</th><th>IP / MAC</th><th>Status</th><th>Monitoring</th><th></th></tr>
           </thead>
           <tbody>
             {shown.map(d => {
@@ -163,6 +183,25 @@ function DevicesManager({ rooms, roomsManaged }: { rooms: FloorRoom[]; roomsMana
                       <div style={{ fontSize: 10.5, color: 'var(--text3)', marginTop: 2 }}>Placed in {autoRoom} by its name</div>
                     )}
                   </td>
+                  <td style={{ minWidth: 170 }}>
+                    {(() => {
+                      const auto = d.parent_source && d.parent_source !== 'manual' && d.parent_id ? byId.get(d.parent_id) : null
+                      const blocked = descendants(d.id)
+                      return (<>
+                        <select suppressHydrationWarning className="form-select" value={x.parent} disabled={!linksManaged}
+                          title={!linksManaged ? 'Run supabase/migration_objectives.sql to store topology links' : undefined}
+                          onChange={e => edit(d, { parent: e.target.value })}>
+                          <option value="">Automatic{auto ? ' — ' + auto.name : ''}</option>
+                          {devices.filter(p => !blocked.has(p.id)).map(p => <option key={p.id} value={p.id}>{p.name} ({p.ip})</option>)}
+                        </select>
+                        {auto && !x.parent && (
+                          <div style={{ fontSize: 10.5, color: 'var(--text3)', marginTop: 2 }}>
+                            {d.parent_port ? 'Port ' + d.parent_port + ' · ' : ''}from {SOURCE_LABEL[d.parent_source!] ?? d.parent_source}
+                          </div>
+                        )}
+                      </>)
+                    })()}
+                  </td>
                   <td className="mono" style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}>
                     {d.ip}<div style={{ color: 'var(--text3)' }}>{d.mac ?? '—'}</div>
                   </td>
@@ -184,7 +223,7 @@ function DevicesManager({ rooms, roomsManaged }: { rooms: FloorRoom[]; roomsMana
                 </tr>
               )
             })}
-            {!shown.length && <tr><td colSpan={8} style={{ textAlign: 'center', padding: 24, color: 'var(--text3)' }}>No devices found.</td></tr>}
+            {!shown.length && <tr><td colSpan={9} style={{ textAlign: 'center', padding: 24, color: 'var(--text3)' }}>No devices found.</td></tr>}
           </tbody>
         </table>
       </div>

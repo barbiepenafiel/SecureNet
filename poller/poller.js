@@ -143,7 +143,7 @@ async function pollAll() {
     .map(r => r.value)
 
   if (ok.length === 0) {
-    console.log('  No responses. Are snmpsim agents running? (see poller/snmpsim/start.bat)')
+    console.log('  No responses from any SNMP device.')
     return
   }
 

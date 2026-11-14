@@ -40,6 +40,7 @@ Each file is safe to run more than once.
 | `supabase/migration_agent_jobs.sql` | **Required.** Request queue for Add Device / Config Backup on the hosted dashboard. |
 | `supabase/migration_snmp_status.sql` | Shows why a device isn't answering SNMP: unreachable, disabled, authentication failed or timeout. |
 | `supabase/migration_agent_watchdog.sql` | Optional. Raises a critical alert if the agent stops reporting for 3 minutes. |
+| `supabase/migration_objectives.sql` | **Required for:** alert thresholds (CPU, memory, flapping, grace period), topology links, email recipients and delivery tracking, fast availability reports. |
 
 ### 2. Dashboard (Vercel)
 
@@ -89,6 +90,10 @@ Optional settings in `poller/.env` (or the project `.env`):
 | `MIKROTIK_POLL_MS` | `15000` | MikroTik SNMP poll interval |
 | `JOB_POLL_MS` | `2000` | How often dashboard requests are picked up |
 | `AGENT_PRIORITY` | `0` | If the agent is ever started on a second computer, the higher priority one monitors and the other stands by |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` | — / `587` | Email for alerts, incident reports and the daily report (sent by the agent). For Gmail use an App Password. |
+| `SMTP_FROM` | `SMTP_USER` | Sender address |
+| `SMTP_TO` | — | Fallback recipients (comma-separated) when none are set in Settings → Email Notifications |
+| `REPORT_HOUR` | `7` | Hour of the day (local) from which the daily report is made and emailed |
 
 ---
 
@@ -110,6 +115,9 @@ Optional settings in `poller/.env` (or the project `.env`):
 | Function | Where it runs |
 |---|---|
 | Network sweep, discovery, online/offline status, alerts (ICMP + ARP) | Agent |
+| Topology links (routers' ARP / bridge tables over SNMP, gateway segment) | Agent |
+| CPU / memory / flapping alerts, grace period | Agent |
+| Alert emails, incident reports, daily report snapshot + email | Agent |
 | MikroTik SNMP (system, CPU, memory, interfaces, traffic) | Agent |
 | SNMP for other devices (uptime, CPU, memory, model, firmware, traffic) | Agent |
 | Add Device live detection, Config Backup snapshots | Agent, on request from the dashboard |
@@ -129,7 +137,8 @@ the checks itself.
   agent is offline.
 - **On another network** (home, hotspot) the agent scans that network instead: it would add that network's
   devices and could mark manually added campus devices offline.
-- **Email notifications and the daily report snapshot** are triggered from an open dashboard tab
-  (and email needs `SMTP_*` variables, which are not configured).
+- **Email notifications and the daily report** are sent by the agent, so they need the laptop on (no
+  dashboard tab needed). Email needs the `SMTP_*` settings in the agent's `.env`.
+- **Uptime history** (latency_samples) is kept for 7 days, so 30-day availability covers the last 7 days.
 - **Devices on other subnets** (for example behind the hEX) are only reachable if the laptop has a route to
   them, and ARP/MAC detection only works on the laptop's own subnet.

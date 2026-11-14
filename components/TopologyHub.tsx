@@ -6,9 +6,10 @@ import { useRouter } from 'next/navigation'
 import type { Device, ScanResult } from '@/lib/database.types'
 import { supabase } from '@/lib/supabase'
 import TopologyCanvas from './TopologyCanvas'
+import TopologyLinks from './TopologyLinks'
 import { useFloorRooms, roomOfDevice, stripRoomLabels, FLOOR_VIEWBOX, type FloorRoom } from '@/lib/floor-rooms'
 
-type ViewMode = 'buildings' | 'tree' | 'floormap' | 'realtime'
+type ViewMode = 'buildings' | 'tree' | 'links' | 'floormap' | 'realtime'
 
 type BldgGroup = {
   name: string
@@ -647,7 +648,9 @@ export default function TopologyHub({ devs, clientCounts = {}, mode, initialBldg
   initialBldg?: string
 }) {
   const router = useRouter()
-  const [viewMode,     setViewMode]     = useState<ViewMode>(mode === 'topology' ? 'tree' : 'realtime')
+  // Topology opens on the real connection tree once the agent has learned links
+  const hasLinks = devs.some(d => !!d.parent_id)
+  const [viewMode,     setViewMode]     = useState<ViewMode>(mode === 'topology' ? (hasLinks ? 'links' : 'tree') : 'realtime')
   const [bldgFilter,   setBldgFilter]   = useState(initialBldg ?? 'all')
   const [statusFilter, setStatusFilter] = useState('all')
   const [typeFilter,   setTypeFilter]   = useState('all')
@@ -764,7 +767,8 @@ export default function TopologyHub({ devs, clientCounts = {}, mode, initialBldg
 
   const VIEW_OPTIONS = mode === 'topology'
     ? [
-        { value: 'tree'      as ViewMode, label: 'Topology Tree',   icon: '🌐' },
+        { value: 'links'     as ViewMode, label: 'Connection Tree', icon: '🔗' },
+        { value: 'tree'      as ViewMode, label: 'Network Tree (by subnet)', icon: '🌐' },
         { value: 'buildings' as ViewMode, label: 'Buildings View',  icon: '🏢' },
       ]
     : [
@@ -780,12 +784,14 @@ export default function TopologyHub({ devs, clientCounts = {}, mode, initialBldg
         bldgGroups={bldgGroups} devs={devs} deviceTypes={deviceTypes} viewOptions={VIEW_OPTIONS}/>
 
       <div className="card" style={{ borderRadius: '0 0 10px 10px', borderTop: 'none' }}>
-        <div className="card-body" style={{ padding: viewMode === 'tree' ? 0 : 20 }}>
+        <div className="card-body" style={{ padding: viewMode === 'tree' || viewMode === 'links' ? 0 : 20 }}>
 
           {viewMode === 'buildings' && (
             <BuildingsView groups={filteredGroups}
               onSelectBldg={name => router.push(`/floorplan?bldg=${encodeURIComponent(name)}`)}/>
           )}
+
+          {viewMode === 'links' && <TopologyLinks devs={filteredDevs}/>}
 
           {viewMode === 'tree' && (() => {
             if (scanLoading && !devs.length) return (

@@ -32,6 +32,8 @@ const generic  = require('./snmp-generic') // SNMP poll for every other SNMP dev
 const snmpStatus = require('./snmp-status') // why a device didn't answer SNMP
 const jobs     = require('./jobs')       // LAN requests from the (hosted) dashboard
 const standby  = require('./standby')    // only one agent monitors at a time
+const links    = require('./links')      // topology: which device each device is connected to
+const notify   = require('./notify')     // email alerts, incident reports, daily report
 
 const execAsync = promisify(exec)
 
@@ -377,6 +379,25 @@ const dnsTried = new Map()      // device id → ms of last reverse-DNS attempt
 let discoveryColumns = true
 let discoveryRetryAt = 0
 
+// MAC of every port of the routers on record (mikrotik_interfaces, from
+// mikrotik.js): a router answers with a different MAC on each port/bridge,
+// which must not become a second device record. Refreshed every 5 minutes.
+let portMacCache = { map: new Map(), at: 0 }
+async function routerPortMacs() {
+  if (Date.now() - portMacCache.at < 5 * 60_000) return portMacCache.map
+  const { data, error } = await supabase.from('mikrotik_interfaces').select('device_id, mac')
+  if (!error) {
+    const map = new Map()   // MAC → device ids that have it on a port
+    for (const r of data ?? []) {
+      if (!r.mac) continue
+      const k = String(r.mac).toUpperCase()
+      map.set(k, [...(map.get(k) ?? []), r.device_id])
+    }
+    portMacCache = { map, at: Date.now() }
+  }
+  return portMacCache.map
+}
+
 async function loadDevices() {
   const { data, error } = await supabase.from('devices').select('*')
   if (error) { console.log(`  [devices] read failed: ${error.message}`); return null }
@@ -445,16 +466,22 @@ async function registerDevice(host, net) {
 // flip back and forth around the limit.
 const LATENCY_SAMPLES = 3
 const LATENCY_CLEAR_RATIO = 0.8
-const latencyLimits = { warnMs: 100, critMs: 250, loadedAt: 0 }
+// The rest of Settings → Alert Thresholds is used below: CPU / memory
+// (resource alerts), flap threshold and grace period (offline alerts).
+const latencyLimits = { warnMs: 100, critMs: 250, cpuWarn: 80, cpuCrit: 95, memWarn: 85, memCrit: 95, flap: 3, graceMin: 0, loadedAt: 0 }
 const latencySamples = new Map()   // device id → last ping times (ms)
 const latencyWarned = new Set()    // device ids with an open latency warning
 
 async function loadLatencyLimits() {
   if (Date.now() - latencyLimits.loadedAt < 60_000) return
   latencyLimits.loadedAt = Date.now()
-  const { data } = await supabase.from('alert_config').select('latency_warn_ms, latency_crit_ms').limit(1).maybeSingle()
-  if (data?.latency_warn_ms > 0) latencyLimits.warnMs = data.latency_warn_ms
-  if (data?.latency_crit_ms > 0) latencyLimits.critMs = data.latency_crit_ms
+  const { data } = await supabase.from('alert_config').select('*').limit(1).maybeSingle()
+  if (!data) return                                  // table not installed: defaults
+  const set = (key, col, min = 1) => { if (Number(data[col]) >= min) latencyLimits[key] = Number(data[col]) }
+  set('warnMs', 'latency_warn_ms'); set('critMs', 'latency_crit_ms')
+  set('cpuWarn', 'cpu_warn_pct');   set('cpuCrit', 'cpu_crit_pct')
+  set('memWarn', 'mem_warn_pct');   set('memCrit', 'mem_crit_pct')
+  set('flap', 'flap_threshold');    set('graceMin', 'grace_period_min', 0)
 }
 
 // → { state: 'up' | 'warn', avg } or null when there's no ping time this round
@@ -511,9 +538,10 @@ async function flushSamples() {
   }
 }
 
+// Latency warnings only (flapping and resource alerts are handled separately)
 function openWarningQuery(ip) {
   return supabase.from('alerts').select('id')
-    .ilike('meta', `%IP: ${ip} %`).eq('severity', 'warn').is('resolved_at', null).eq('suppressed', false)
+    .ilike('meta', `%IP: ${ip} %`).eq('severity', 'warn').ilike('title', '%latency%').is('resolved_at', null).eq('suppressed', false)
 }
 
 // One open warning per device (checked in the database, so restarts don't repeat it)
@@ -548,9 +576,104 @@ async function clearLatencyWarning(dev, note) {
   latencyWarned.delete(dev.id)
   await supabase.from('alerts')
     .update({ acked: true, resolved_at: new Date().toISOString(), resolved_by: SYSTEM_USER, resolution_notes: note })
-    .ilike('meta', `%IP: ${dev.ip} %`).eq('severity', 'warn').is('resolved_at', null)
+    .ilike('meta', `%IP: ${dev.ip} %`).eq('severity', 'warn').ilike('title', '%latency%').is('resolved_at', null)
     .then(() => {}, () => {})
 }
+
+// ── Flapping: a device that keeps going offline and coming back ──────────────
+// Counted from this agent's own status changes. ≥ flap_threshold changes in
+// 5 minutes raises one Warning; it is resolved after 10 quiet minutes.
+const FLAP_WINDOW_MS = 5 * 60_000
+const FLAP_QUIET_MS = 10 * 60_000
+const flapChanges = new Map()   // device id → timestamps of offline/online changes
+const flapping = new Map()      // device id → alert id
+
+function flapMeta(dev) {
+  return `Flap: ${dev.ip} · IP ${dev.ip} · Location: ${dev.location || 'Unassigned'} · Method: ICMP/ARP · Status: Warning`
+}
+
+async function recordFlap(dev) {
+  const now = Date.now()
+  const list = [...(flapChanges.get(dev.id) ?? []), now].filter(t => now - t <= FLAP_QUIET_MS)
+  flapChanges.set(dev.id, list)
+  const inWindow = list.filter(t => now - t <= FLAP_WINDOW_MS).length
+  if (inWindow < latencyLimits.flap || flapping.has(dev.id)) return
+  const { data: open } = await supabase.from('alerts').select('id').eq('severity', 'warn')
+    .ilike('meta', `Flap: ${dev.ip} %`).is('resolved_at', null).limit(1)
+  if (open?.length) { flapping.set(dev.id, open[0].id); return }
+  const row = {
+    severity: 'warn', title: `${dev.name} is flapping`, meta: flapMeta(dev), acked: false, suppressed: false,
+    root_cause: `Went offline and came back ${inWindow} times in 5 minutes (limit ${latencyLimits.flap}) — an unstable link: loose cable, failing port, weak Wi-Fi or power problem.`,
+    device_name: dev.name, device_ip: dev.ip, device_mac: dev.mac ?? null, location: dev.location || 'Unassigned', detection_method: 'ICMP/ARP',
+  }
+  let { data, error } = await supabase.from('alerts').insert(row).select('id').single()
+  if (error && /column|schema cache/i.test(error.message)) {
+    const { severity, title, meta, acked, suppressed, root_cause } = row
+    ;({ data } = await supabase.from('alerts').insert({ severity, title, meta, acked, suppressed, root_cause }).select('id').single())
+  }
+  if (data) flapping.set(dev.id, data.id)
+  console.log(`  [flap] ${dev.name} ${dev.ip}: ${inWindow} changes in 5 min`)
+}
+
+async function settleFlaps() {
+  const now = Date.now()
+  for (const [id, alertId] of flapping) {
+    const last = Math.max(0, ...(flapChanges.get(id) ?? []))
+    if (now - last < FLAP_QUIET_MS) continue
+    flapping.delete(id)
+    await supabase.from('alerts').update({ acked: true, resolved_at: new Date().toISOString(), resolved_by: SYSTEM_USER, resolution_notes: 'Stable for 10 minutes' })
+      .eq('id', alertId).is('resolved_at', null).then(() => {}, () => {})
+  }
+}
+
+// ── CPU / memory above Settings → Alert Thresholds ───────────────────────────
+// From the values the SNMP collectors (snmp-generic.js, mikrotik.js) store on
+// the device; a reading counts only while the device answers SNMP right now
+// (snmp_status 'responding' and the SNMP monitor's state 'online').
+// Warning at the warning level, Critical at the critical level; resolved once
+// the value drops below 90 % of the warning level.
+let resourcesCheckedAt = 0
+const resMeta = (kind, dev) => `Resource: ${kind} · Device address ${dev.ip} · Location: ${dev.location || 'Unassigned'} · Method: SNMP`
+
+async function checkResources() {
+  if (Date.now() - resourcesCheckedAt < 60_000) return
+  resourcesCheckedAt = Date.now()
+  const { data: devs } = await supabase.from('devices').select('id, name, ip, mac, location, status, cpu, mem, snmp_status, snmp_state')
+    .or('cpu.gt.0,mem.gt.0')
+  const { data: open } = await supabase.from('alerts').select('id, severity, meta').like('meta', 'Resource: %').is('resolved_at', null)
+  const openBy = new Map((open ?? []).map(a => [a.meta.split(' · Location')[0], a]))
+
+  for (const d of devs ?? []) {
+    const fresh = d.snmp_status === 'responding' && d.snmp_state === 'online'
+    for (const [kind, value, warn, crit] of [['CPU', d.cpu, latencyLimits.cpuWarn, latencyLimits.cpuCrit], ['Memory', d.mem, latencyLimits.memWarn, latencyLimits.memCrit]]) {
+      const key = resMeta(kind, d).split(' · Location')[0]
+      const cur = openBy.get(key)
+      if (cur && (!fresh || d.status === 'down' || value < warn * 0.9)) {
+        await supabase.from('alerts').update({ acked: true, resolved_at: new Date().toISOString(), resolved_by: SYSTEM_USER,
+          resolution_notes: fresh && d.status !== 'down' ? `${kind} back to ${value}%` : `${kind} no longer measured` }).eq('id', cur.id)
+        continue
+      }
+      if (!fresh || (d.status !== 'up' && d.status !== 'warn') || value < warn) continue
+      const severity = value >= crit ? 'crit' : 'warn'
+      if (cur && (cur.severity === severity || severity === 'warn')) continue     // already alerted at this level
+      if (cur) await supabase.from('alerts').update({ resolved_at: new Date().toISOString(), resolved_by: SYSTEM_USER, resolution_notes: `Raised to critical (${value}%)` }).eq('id', cur.id)
+      const row = {
+        severity, title: `${d.name} ${kind.toLowerCase()} at ${value}%`, meta: resMeta(kind, d), acked: false, suppressed: false,
+        root_cause: `${kind} usage ${value}% — ${severity === 'crit' ? `at or above the critical limit of ${crit}%` : `above the warning limit of ${warn}%`}. Check for a stuck process, traffic surge or an undersized device.`,
+        device_name: d.name, device_ip: d.ip, device_mac: d.mac ?? null, location: d.location || 'Unassigned', detection_method: 'SNMP',
+      }
+      const { error } = await supabase.from('alerts').insert(row)
+      if (error && /column|schema cache/i.test(error.message)) {
+        const { severity: s, title, meta, acked, suppressed, root_cause } = row
+        await supabase.from('alerts').insert({ severity: s, title, meta, acked, suppressed, root_cause })
+      }
+      console.log(`  [resource] ${d.name} ${kind} ${value}% (${severity})`)
+    }
+  }
+}
+
+// ── Grace period before an offline alert ─────────────────────────────────────
+const downSince = new Map()     // device id → ms it was confirmed offline
 
 async function reconcileDevices(net, icmpMap, neighbors, extraLive = []) {
   const devices = await loadDevices()
@@ -579,8 +702,11 @@ async function reconcileDevices(net, icmpMap, neighbors, extraLive = []) {
   if (!discoveryColumns && Date.now() >= discoveryRetryAt) discoveryColumns = true   // try again
   if (discoveryColumns) {
     const byMac = new Map(devices.filter(d => d.mac).map(d => [d.mac.toUpperCase(), d]))
+    const ports = await routerPortMacs()
     for (const h of live) {
       if (h.mac && byMac.has(h.mac)) continue
+      // Another port of a router already on record (e.g. the hEX seen on its bridge) — same device
+      if (h.mac && ports.get(h.mac)?.some(id => devices.some(d => d.id === id))) continue
       const sameIp = devices.find(d => d.ip === h.ip)
       if (sameIp && (!sameIp.mac || !h.mac)) {
         // Known by IP only — learn its MAC now
@@ -657,8 +783,10 @@ async function reconcileDevices(net, icmpMap, neighbors, extraLive = []) {
       else if (target === 'up' && (d.status === 'warn' || latencyWarned.has(d.id))) {
         await clearLatencyWarning({ ...d, ip }, lat ? `Latency back to normal (${lat.avg} ms average)` : 'Latency back to normal')
       }
+      downSince.delete(d.id)
       if (d.status === 'down') {
         await supabase.from('status_events').insert({ device_id: d.id, device_name: d.name, device_ip: ip, old_status: 'down', new_status: 'up' }).then(() => {}, () => {})
+        await recordFlap({ ...d, ip })
       }
       if (await lastAnnounced(ip) === 'offline' || (ip !== d.ip && await lastAnnounced(d.ip) === 'offline')) {
         // Confirm against the database right before alerting (another monitor may have just done it)
@@ -694,11 +822,16 @@ async function reconcileDevices(net, icmpMap, neighbors, extraLive = []) {
     // An offline device has no latency — close any open latency warning
     latencySamples.delete(d.id)
     if (d.status === 'warn' || latencyWarned.has(d.id)) await clearLatencyWarning(d, 'Device went offline')
+    if (!downSince.has(d.id)) downSince.set(d.id, nowMs)
     if (d.status !== 'down') {
       await updateDevice(d.id, { status: 'down' })
       await supabase.from('status_events').insert({ device_id: d.id, device_name: d.name, device_ip: d.ip, old_status: d.status, new_status: 'down' }).then(() => {}, () => {})
+      await recordFlap(d)
     }
-    if (await lastAnnounced(d.ip) !== 'offline' && await freshAnnounced(d.ip) !== 'offline') {
+    // Grace period (Settings): wait this long after the device is confirmed
+    // offline before alerting — if it comes back first, no alert at all
+    const graceOk = nowMs - downSince.get(d.id) >= latencyLimits.graceMin * 60_000
+    if (graceOk && await lastAnnounced(d.ip) !== 'offline' && await freshAnnounced(d.ip) !== 'offline') {
       console.log(`  [status] ${d.name} ${d.ip} is offline`)
       await insertAlert(d, 'offline', `No response (ICMP ×${FAILS_BEFORE_OFFLINE}, ARP${d.snmp_community && d.source !== 'discovered' ? ', SNMP' : ''})`)
     }
@@ -706,6 +839,8 @@ async function reconcileDevices(net, icmpMap, neighbors, extraLive = []) {
 
   console.log(`  [status] ${counts.up} online, ${counts.warn} warning (latency ≥ ${latencyLimits.warnMs} ms), ${counts.unreachable} unreachable, ${counts.down} offline, ${counts.unknown} unknown`)
   await flushSamples()
+  await settleFlaps()
+  await checkResources().catch(e => console.log(`  [resource] ${e.message}`))
 }
 
 async function heartbeat(net, hostsSeen) {
@@ -888,6 +1023,8 @@ async function scanNetwork() {
 
   await heartbeat(net, rows.length)
   await reconcileDevices(net, icmpMap, neighbors, extraLive)
+  // Topology links from the gateway segment and routers' ARP / bridge tables (every ~60 s)
+  await links.update(supabase, net, rows.map(r => r.ip), neighbors).catch(e => console.log(`  [links] ${e.message}`))
 }
 
 const EXTRA_SCAN_EVERY = 4   // other networks: every 4th round (~60 s)
@@ -932,6 +1069,7 @@ setInterval(runPoll, POLL_MS)
 mikrotik.start(supabase, () => !standby.isStandby())
 jobs.start(supabase, () => !standby.isStandby())
 snmpStatus.startMonitor(supabase, () => !standby.isStandby())
+notify.start(supabase, () => !standby.isStandby())
 
 // A stray network error must never stop monitoring — log it and carry on.
 // (pm2 restarts the agent if it does exit.)

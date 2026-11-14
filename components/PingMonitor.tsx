@@ -136,25 +136,14 @@ export default function PingMonitor() {
           }
         })
         saveSet('nms_notified_alert_ids', notifiedAlerts)
-
-        // ── 4b. Send email notification for new critical alerts ──
-        const hasCrit = recentAlerts.some((a: { severity: string }) => a.severity === 'crit')
-        if (hasCrit) {
-          fetch('/api/notify/email', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
-            .catch(() => {}) // email is best-effort
-        }
+        // Email for these alerts is sent by the agent (poller/notify.js), not from this tab
       }
 
       // ── 5. Poll SNMP for uptime/CPU/mem on all devices ──
       fetch('/api/snmp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
         .catch(() => {})
 
-      // ── 6. Auto-generate daily report snapshot ──
-      fetch('/api/reports/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ auto: true }),
-      }).catch(() => {})
+      // (The daily report snapshot is made and emailed by the agent — poller/notify.js)
 
       setLastRun(new Date())
     } catch {

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { supabase } from '@/lib/supabase'
-import type { Device, Alert, SlaRecord } from '@/lib/database.types'
+import type { Device, Alert } from '@/lib/database.types'
 import { usePolling } from '@/lib/usePolling'
 import {
   LatencyTrendChart, AlertBreakdownChart,
@@ -32,14 +32,13 @@ const PERIOD_MS: Record<Period, number> = {
   '30d': 2_592_000_000,
 }
 
-interface ScanSample    { latency_ms: number | null; responded: boolean; scanned_at: string; ip: string }
-interface DiscoveredHost { ip: string; hostname: string | null; vendor: string | null; device_type: string | null; scan_type: string; responded: boolean; latency_ms: number | null }
 
 function uptimeColor(pct: number) {
   return pct >= 99 ? 'var(--ok)' : pct >= 90 ? 'var(--warn)' : 'var(--crit)'
 }
 
-function UptimeBadge({ pct }: { pct: number }) {
+function UptimeBadge({ pct }: { pct: number | null }) {
+  if (pct === null) return <span style={{ color: 'var(--text3)', fontSize: 12 }} title="No measurements in this period">—</span>
   return (
     <span style={{
       display: 'inline-block', padding: '2px 8px', borderRadius: 4,
@@ -80,57 +79,89 @@ function TrendKpi({ label, value, sub, accent }: { label: string; value: string;
   )
 }
 
-function exportCSV(rows: DevicePerfRow[], period: Period) {
-  const header = ['Device Name','IP','Type','Building/Floor','Uptime %','Avg Latency (ms)','Alerts']
-  const lines = rows.map(r => [r.name,r.ip,r.type,r.location,r.uptimePct.toFixed(1),r.latency??'—',r.alertCount].join(','))
-  const csv = [header.join(','), ...lines].join('\n')
+function downloadCSV(name: string, header: string[], rows: (string | number | null)[][]) {
+  const cell = (v: string | number | null) => {
+    const s = v == null ? '' : String(v)
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+  }
+  const csv = [header, ...rows].map(r => r.map(cell).join(',')).join('\n')
   const blob = new Blob([csv], { type: 'text/csv' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `network-report-${period}-${new Date().toISOString().slice(0,10)}.csv`
+  a.download = name
   a.click()
   URL.revokeObjectURL(url)
 }
 
-interface DevicePerfRow {
-  name: string; ip: string; type: string; location: string
-  uptimePct: number; latency: number | null; alertCount: number
+function exportCSV(rows: DevicePerfRow[], period: Period) {
+  downloadCSV(`network-report-${period}-${new Date().toISOString().slice(0, 10)}.csv`,
+    ['Device Name', 'IP', 'Type', 'Location', 'Status', 'Uptime %', 'Downtime (min)', 'Avg Latency (ms)', 'Alerts'],
+    rows.map(r => [r.name, r.ip, r.type, r.location, r.status, r.uptimePct, r.downMin, r.latency, r.alertCount]))
 }
+
+interface DevicePerfRow {
+  name: string; ip: string; type: string; location: string; status: string
+  uptimePct: number | null; downMin: number; latency: number | null; alertCount: number
+}
+
+// /api/reports/availability — measured by the agent each minute (poller/report-core.js)
+interface Availability {
+  period: Period; historyDays: number; measuredSince: string
+  devices: Record<string, { upMin: number; downMin: number; unknownMin: number; uptimePct: number | null; avgLatencyMs: number | null }>
+  trend: { bucket: string; avgMs: number | null; minMs: number | null; maxMs: number | null; samples: number; offlineDevices: number }[]
+  incidents: { id: number; title: string; device: string | null; ip: string | null; location: string | null; method: string | null; rootCause: string | null; startedAt: string; resolvedAt: string | null; durationMs: number; open: boolean }[]
+}
+
+const STATUS_LABEL: Record<string, string> = { up: 'Online', warn: 'Warning', down: 'Offline', unreachable: 'Unreachable', unknown: 'Unknown', maint: 'Maintenance' }
+const isUnassigned = (l: string | null | undefined) => !l || l === 'Unassigned'
+const fmtDur = (ms: number) => fmtMinutes(Math.max(0, Math.round(ms / 60_000)))
 
 export default function ReportsPage() {
   const [period,    setPeriod]    = useState<Period>('24h')
   const [devices,   setDevices]   = useState<Device[]>([])
   const [alerts,    setAlerts]    = useState<Alert[]>([])
-  const [slaData,   setSlaData]   = useState<SlaRecord[]>([])
-  const [scanData,  setScanData]  = useState<ScanSample[]>([])
-  const [discovered, setDiscovered] = useState<DiscoveredHost[]>([])
+  const [avail,     setAvail]     = useState<Availability | null>(null)
+  const [availErr,  setAvailErr]  = useState<string | null>(null)
   const [showAll,   setShowAll]   = useState(false)
+  const [showAllInc, setShowAllInc] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [genMsg,    setGenMsg]    = useState<string | null>(null)
+  // Filters (device category, location, current status)
+  const [typeF,     setTypeF]     = useState('')
+  const [locF,      setLocF]      = useState('')
+  const [statusF,   setStatusF]   = useState('')
 
   const load = useCallback(async () => {
-    const cutoff30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
-    const [{ data: d }, { data: a }, { data: s }, { data: sc }, scanRes] = await Promise.all([
-      supabase.from('devices').select('*').order('name'),
-      supabase.from('alerts').select('*').order('created_at', { ascending: false }),
-      supabase.from('sla_data').select('*'),
-      supabase.from('scan_results').select('latency_ms, responded, scanned_at, ip').gte('scanned_at', cutoff30d).order('scanned_at', { ascending: true }).limit(5000),
-      fetch('/api/scan').then(r => r.ok ? r.json() : { results: [] }).catch(() => ({ results: [] })),
-    ])
-    setDevices(d ?? [])
-    setAlerts(a ?? [])
-    setSlaData(s ?? [])
-    setScanData((sc ?? []) as ScanSample[])
-    // Discovered = scan results not in managed devices table
-    const managedIps = new Set((d ?? []).map((dev: { ip: string }) => dev.ip))
-    const allDiscovered: DiscoveredHost[] = (scanRes.results ?? []).filter((h: DiscoveredHost) => !managedIps.has(h.ip))
-    setDiscovered(allDiscovered)
-  }, [])
+    const since = new Date(Date.now() - PERIOD_MS[period]).toISOString()
+    // Every alert in the period (one request returns at most 1000 rows)
+    const all: Alert[] = []
+    for (let from = 0; from < 20_000; from += 1000) {
+      const { data } = await supabase.from('alerts').select('*').gte('created_at', since)
+        .order('created_at', { ascending: false }).range(from, from + 999)
+      all.push(...((data ?? []) as Alert[]))
+      if (!data || data.length < 1000) break
+    }
+    const { data: d } = await supabase.from('devices').select('*').order('name')
+    setDevices((d ?? []) as Device[])
+    setAlerts(all)
+  }, [period])
 
   useEffect(() => { load() }, [load])
   // Keep data current without a manual refresh
-  usePolling(load, 15_000)
+  usePolling(load, 30_000)
+
+  const loadAvail = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/reports/availability?period=${period}`)
+      const d = await r.json()
+      if (r.ok) { setAvail(d); setAvailErr(null) } else setAvailErr(d.error ?? 'Could not load measurements')
+    } catch { /* keep the last data */ }
+  }, [period])
+  useEffect(() => { loadAvail() }, [loadAvail])
+  usePolling(loadAvail, 60_000)
+  // Only use measurements for the selected period
+  const av = avail && avail.period === period ? avail : null
 
   // ── SNMP devices: uptime + traffic from stored history (server-side) ──
   const [snmpReport, setSnmpReport] = useState<SnmpReport | null>(null)
@@ -143,10 +174,28 @@ export default function ReportsPage() {
   useEffect(() => { loadSnmp() }, [loadSnmp])
   usePolling(loadSnmp, 60_000)
 
+  // ── Filters ──────────────────────────────────────────────────
+  const typeOptions = useMemo(() => [...new Set(devices.map(d => d.type))].sort(), [devices])
+  const locOptions  = useMemo(() => [...new Set(devices.map(d => isUnassigned(d.location) ? 'Unassigned' : d.location))].sort(), [devices])
+  const filtering = !!(typeF || locF || statusF)
+  const fDevices = useMemo(() => devices.filter(d =>
+    (!typeF || d.type === typeF) &&
+    (!locF || (isUnassigned(d.location) ? 'Unassigned' : d.location) === locF) &&
+    (!statusF || d.status === statusF)), [devices, typeF, locF, statusF])
+  const fIps   = useMemo(() => new Set(fDevices.map(d => d.ip)), [fDevices])
+  const fNames = useMemo(() => new Set(fDevices.map(d => d.name)), [fDevices])
+  const alertIp = (a: Alert) => a.device_ip ?? a.meta?.match(/(?:IP:?|Device address) ([\d.]+)/)?.[1] ?? null
+  const matchesFilter = useCallback((a: Alert) => {
+    if (!filtering) return true
+    const ip = alertIp(a)
+    return (!!ip && fIps.has(ip)) || (!!a.device_name && fNames.has(a.device_name))
+  }, [filtering, fIps, fNames])
+
   const snmp = useMemo(() => {
     // Only a report for the selected period (ignore one still arriving for the previous period)
-    const devs = snmpReport && snmpReport.period === period ? snmpReport.devices : null
-    if (!devs) return null
+    const all = snmpReport && snmpReport.period === period ? snmpReport.devices : null
+    if (!all) return null
+    const devs = filtering ? all.filter(d => fNames.has(d.name)) : all
     const measured = devs.filter(d => d.uptimePct !== null)
     const withTraffic = devs.filter(d => d.avgInMbps !== null)
     return {
@@ -159,84 +208,60 @@ export default function ReportsPage() {
       trOut:      withTraffic.map(d => d.outBytes),
       measuredMin: Math.max(0, ...devs.map(d => d.upMin + d.downMin + d.unknownMin)),
     }
-  }, [snmpReport, period])
+  }, [snmpReport, period, filtering, fNames])
 
   // ── Period-filtered alerts ───────────────────────────────────
-  const cutoff = useMemo(() => new Date(Date.now() - PERIOD_MS[period]), [period])
-  const pAlerts = useMemo(() => alerts.filter(a => new Date(a.created_at) >= cutoff), [alerts, cutoff])
+  const pAlerts = useMemo(() => alerts.filter(matchesFilter), [alerts, matchesFilter])
 
-  // ── KPIs ─────────────────────────────────────────────────────
-  const devicesMonitored = devices.length + discovered.length
-  const avgUptime = useMemo(() => {
-    if (slaData.length) return (slaData.reduce((s,r) => s + Number(r.uptime_pct), 0) / slaData.length).toFixed(1)
-    if (!devices.length) return '0.0'
-    return (devices.filter(d => d.status !== 'down').length / devices.length * 100).toFixed(1)
-  }, [slaData, devices])
-
-  const avgCPU = devices.length ? devices.reduce((s,d) => s + d.cpu, 0) / devices.length : 50
-  // Average latency: prefer scan_results table, fall back to /api/scan discovered hosts
+  // ── KPIs (measured) ──────────────────────────────────────────
+  const devicesMonitored = fDevices.length
+  const discoveredCount = fDevices.filter(d => d.source === 'discovered').length
+  const measuredDevs = useMemo(() => fDevices.map(d => av?.devices[d.id]).filter(a => a && a.uptimePct !== null), [fDevices, av])
+  const avgUptime = measuredDevs.length
+    ? (measuredDevs.reduce((s, a) => s + a!.uptimePct!, 0) / measuredDevs.length).toFixed(1)
+    : '—'
   const avgLatency = useMemo(() => {
-    const fromDb = scanData.filter(s => s.responded && s.latency_ms != null && new Date(s.scanned_at) >= cutoff)
-    if (fromDb.length) {
-      const avg = fromDb.reduce((a, s) => a + s.latency_ms!, 0) / fromDb.length
-      return avg.toFixed(1)
-    }
-    // Fall back to latency from /api/scan discovered hosts
-    const fromScan = [...discovered].filter(h => h.responded && h.latency_ms != null)
-    if (fromScan.length) {
-      const avg = fromScan.reduce((a, h) => a + h.latency_ms!, 0) / fromScan.length
-      return avg.toFixed(1)
-    }
-    return '—'
-  }, [scanData, cutoff, discovered])
+    const vals = fDevices.map(d => av?.devices[d.id]?.avgLatencyMs).filter((v): v is number => v != null)
+    return vals.length ? (vals.reduce((a, v) => a + v, 0) / vals.length).toFixed(1) : '—'
+  }, [fDevices, av])
+  const measuredNote = period === '30d' && av ? `measured each minute · last ${av.historyDays} days kept` : 'measured each minute'
   const totalAlerts = pAlerts.length
   const critCount = pAlerts.filter(a => a.severity === 'crit').length
   const warnCount = pAlerts.filter(a => a.severity === 'warn').length
-  const infoCount = pAlerts.filter(a => a.severity === 'info').length
 
   // ── Trend KPIs ───────────────────────────────────────────────
   const hourCounts = useMemo(() => {
     const arr = Array(24).fill(0)
-    pAlerts.forEach(a => { arr[new Date(a.created_at).getHours()]++ })
+    pAlerts.forEach(a => { if (a.severity !== 'info') arr[new Date(a.created_at).getHours()]++ })
     return arr
   }, [pAlerts])
   const peakHourIdx = hourCounts.indexOf(Math.max(...hourCounts))
-  const peakHourLabel = pAlerts.length === 0 ? '—' : (() => {
+  const peakHourLabel = !hourCounts.some(Boolean) ? '—' : (() => {
     const h = peakHourIdx % 12 || 12
     return `${h} ${peakHourIdx < 12 ? 'AM' : 'PM'}`
   })()
 
-  const mostProblematic = useMemo(() => {
-    const counts: Record<string,number> = {}
-    pAlerts.forEach(a => {
-      const key = a.meta?.split('·')[0]?.trim() || a.title.split(' ')[0]
-      counts[key] = (counts[key] ?? 0) + 1
-    })
-    const top = Object.entries(counts).sort((a,b) => b[1]-a[1])[0]
-    if (top) return { name: top[0].slice(0,16), count: top[1] }
-    const down = devices.find(d => d.status === 'down')
-    return down ? { name: down.ip || down.name, count: 0 } : { name: '—', count: 0 }
-  }, [pAlerts, devices])
-
-  // Resolution rate = acked or resolved alerts / total
-  const resolvedAlerts = pAlerts.filter(a => a.acked || a.resolved_at)
-  const resolutionRate = totalAlerts === 0 ? '—' : `${Math.round(resolvedAlerts.length / totalAlerts * 100)}%`
-
-  // Avg resolution time = mean of (resolved_at - created_at) for alerts that have resolved_at
-  const avgResolution = useMemo(() => {
-    const withTime = pAlerts.filter(a => a.resolved_at && a.created_at)
-    if (!withTime.length) {
-      // Fall back: use acked alerts — treat acked_at as ~now if no resolved_at
-      const acked = pAlerts.filter(a => a.acked && a.created_at)
-      if (!acked.length) return '—'
-      const avgMs = acked.reduce((s, a) => s + (Date.now() - new Date(a.created_at).getTime()), 0) / acked.length
-      const mins = Math.round(avgMs / 60000)
-      return mins < 60 ? `${mins}m` : `${Math.round(mins/60)}h`
-    }
-    const avgMs = withTime.reduce((s, a) => s + (new Date(a.resolved_at!).getTime() - new Date(a.created_at).getTime()), 0) / withTime.length
-    const mins = Math.round(avgMs / 60000)
-    return mins < 60 ? `${mins}m` : mins < 1440 ? `${Math.round(mins/60)}h` : `${Math.round(mins/1440)}d`
+  // Device an alert belongs to (name, else its address)
+  const alertKey = (a: Alert) => a.device_name || alertIp(a) || a.meta?.split('·')[0]?.trim() || a.title
+  const problemCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    pAlerts.forEach(a => { if (a.severity !== 'info') counts[alertKey(a)] = (counts[alertKey(a)] ?? 0) + 1 })
+    return Object.entries(counts).sort((a, b) => b[1] - a[1])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pAlerts])
+  const mostProblematic = problemCounts[0] ? { name: problemCounts[0][0].slice(0, 18), count: problemCounts[0][1] } : { name: '—', count: 0 }
+
+  // Resolution rate = problems (critical + warning) resolved / raised
+  const problems = pAlerts.filter(a => a.severity !== 'info')
+  const resolvedAlerts = problems.filter(a => a.resolved_at)
+  const resolutionRate = problems.length === 0 ? '—' : `${Math.round(resolvedAlerts.length / problems.length * 100)}%`
+
+  // Avg resolution time = mean of (resolved_at - created_at) of resolved problems
+  const avgResolution = useMemo(() => {
+    if (!resolvedAlerts.length) return '—'
+    const avgMs = resolvedAlerts.reduce((s, a) => s + (new Date(a.resolved_at!).getTime() - new Date(a.created_at).getTime()), 0) / resolvedAlerts.length
+    return fmtDur(avgMs)
+  }, [resolvedAlerts])
 
   // ── Incident Frequency chart data ────────────────────────────
   const { freqLabels, freqDown, freqLatency, freqRecovery } = useMemo(() => {
@@ -272,131 +297,78 @@ export default function ReportsPage() {
   // ── Peak Failure Hours chart data ────────────────────────────
   const peakLabels = Array.from({length:24},(_,i) => i===0?'12am':i===12?'12pm':i<12?`${i}am`:`${i-12}pm`)
 
-  // ── Top Problem Devices ──────────────────────────────────────
-  const { topLabels, topCounts } = useMemo(() => {
-    const counts: Record<string,number> = {}
-    pAlerts.forEach(a => {
-      const key = a.meta?.split('·')[0]?.trim() || a.title.split(' ')[0]
-      counts[key] = (counts[key] ?? 0) + 1
-    })
-    const pairs = Object.entries(counts).sort((a,b) => b[1]-a[1]).slice(0,8)
-    if (pairs.length) return { topLabels: pairs.map(([k])=>k.length>22?k.slice(0,22)+'…':k), topCounts: pairs.map(([,v])=>v) }
-    const devs = [...devices].sort((a,b) => (a.status==='down'?0:a.status==='warn'?1:2)-(b.status==='down'?0:b.status==='warn'?1:2)).slice(0,8)
-    return { topLabels: devs.map(d=>d.ip||d.name), topCounts: devs.map(d=>d.status==='down'?3:d.status==='warn'?1:0) }
-  }, [pAlerts, devices])
+  // ── Top Problem Devices (critical + warning alerts) ──────────
+  const topPairs = problemCounts.slice(0, 8)
+  const topLabels = topPairs.map(([k]) => k.length > 22 ? k.slice(0, 22) + '…' : k)
+  const topCounts = topPairs.map(([, v]) => v)
 
-  // ── Location Health ──────────────────────────────────────────
+  // ── Location Health (measured minutes Online, per location) ───
   const { locLabels, locUptime, locDowntime } = useMemo(() => {
-    const bldg: Record<string,number[]> = {}
-    slaData.forEach(r => {
-      if (!bldg[r.building]) bldg[r.building] = []
-      bldg[r.building].push(Number(r.uptime_pct))
-    })
-    if (!Object.keys(bldg).length) {
-      // derive from devices
-      devices.forEach(d => {
-        if (!bldg[d.location]) bldg[d.location] = []
-        bldg[d.location].push(d.status==='up'?99.9:d.status==='warn'?80:5)
-      })
+    const acc: Record<string, { up: number; down: number }> = {}
+    for (const d of fDevices) {
+      const a = av?.devices[d.id]
+      if (!a || a.upMin + a.downMin === 0) continue
+      const loc = isUnassigned(d.location) ? 'Unassigned' : d.location
+      acc[loc] ??= { up: 0, down: 0 }
+      acc[loc].up += a.upMin
+      acc[loc].down += a.downMin
     }
-    const labels = Object.keys(bldg)
-    const up = labels.map(b => parseFloat((bldg[b].reduce((s,v)=>s+v,0)/bldg[b].length).toFixed(1)))
-    return { locLabels: labels, locUptime: up, locDowntime: up.map(u => parseFloat((100-u).toFixed(1))) }
-  }, [slaData, devices])
+    const labels = Object.keys(acc).sort((a, b) => Number(a === 'Unassigned') - Number(b === 'Unassigned') || a.localeCompare(b))
+    const up = labels.map(l => Math.round((acc[l].up / (acc[l].up + acc[l].down)) * 1000) / 10)
+    return { locLabels: labels, locUptime: up, locDowntime: up.map(u => Math.round((100 - u) * 10) / 10) }
+  }, [fDevices, av])
 
-  // ── Device Uptime vs Downtime ────────────────────────────────
+  // ── Device Uptime vs Downtime (measured, least available first) ─
   const { uptimeLabels, uptimeUp, uptimeDown } = useMemo(() => {
-    const rows = devices.slice(0, 20).map(d => {
-      const s = slaData.find(r => r.device_name === d.name)
-      const up = s ? Number(s.uptime_pct) : d.status==='up'?99.9:d.status==='warn'?80:5
-      return { label: d.ip || d.name, up: parseFloat(up.toFixed(1)), down: parseFloat((100-up).toFixed(1)) }
-    })
-    return { uptimeLabels: rows.map(r=>r.label), uptimeUp: rows.map(r=>r.up), uptimeDown: rows.map(r=>r.down) }
-  }, [devices, slaData])
+    const rows = fDevices
+      .map(d => ({ d, a: av?.devices[d.id] }))
+      .filter(x => x.a && x.a.uptimePct !== null)
+      .sort((x, y) => x.a!.uptimePct! - y.a!.uptimePct!)
+      .slice(0, 20)
+    return {
+      uptimeLabels: rows.map(r => `${r.d.name} (${r.d.ip})`),
+      uptimeUp: rows.map(r => r.a!.uptimePct!),
+      uptimeDown: rows.map(r => Math.round((100 - r.a!.uptimePct!) * 10) / 10),
+    }
+  }, [fDevices, av])
 
-  // ── Latency trend — built from real scan_results ping data ──────
+  // ── Latency trend (latency_samples, all devices) ─────────────
   const { latLabels, latAvg, latMin, latMax } = useMemo(() => {
-    const responded = scanData.filter(s => s.responded && s.latency_ms != null)
-    const hasRealData = responded.length > 0
-
-    if (period === '24h') {
-      const labels = Array.from({length:24},(_,i) => `${i.toString().padStart(2,'0')}:00`)
-      const buckets: number[][] = Array.from({length:24}, () => [])
-      responded.forEach(s => {
-        const h = new Date(s.scanned_at).getHours()
-        buckets[h].push(s.latency_ms!)
-      })
-      const avg = buckets.map(b => b.length ? Math.round(b.reduce((a,v)=>a+v,0)/b.length) : 0)
-      const min = buckets.map(b => b.length ? Math.min(...b) : 0)
-      const max = buckets.map(b => b.length ? Math.max(...b) : 0)
-      if (hasRealData) return { latLabels: labels, latAvg: avg, latMin: min, latMax: max }
+    const t = av?.trend ?? []
+    const label = (iso: string) => {
+      const d = new Date(iso)
+      const hh = `${d.getHours().toString().padStart(2, '0')}:00`
+      return period === '24h' ? hh : period === '7d' ? `${d.getMonth() + 1}/${d.getDate()} ${hh}` : `${d.getMonth() + 1}/${d.getDate()}`
     }
-    if (period === '7d') {
-      const labels = Array.from({length:7},(_,i) => { const d=new Date(Date.now()-(6-i)*86400000); return `${d.getMonth()+1}/${d.getDate()}` })
-      const buckets: number[][] = Array.from({length:7}, () => [])
-      responded.forEach(s => {
-        const dAgo = Math.floor((Date.now()-new Date(s.scanned_at).getTime())/86400000)
-        const idx = 6 - dAgo
-        if (idx >= 0 && idx < 7) buckets[idx].push(s.latency_ms!)
-      })
-      const avg = buckets.map(b => b.length ? Math.round(b.reduce((a,v)=>a+v,0)/b.length) : 0)
-      if (hasRealData) return { latLabels: labels, latAvg: avg, latMin: avg.map(v=>Math.round(v*.7)), latMax: avg.map(v=>Math.round(v*1.4)) }
+    return {
+      latLabels: t.map(r => label(r.bucket)),
+      latAvg: t.map(r => r.avgMs) as number[],
+      latMin: t.map(r => r.minMs) as number[],
+      latMax: t.map(r => r.maxMs) as number[],
     }
-    // 30d
-    const labels = Array.from({length:30},(_,i) => { const d=new Date(Date.now()-(29-i)*86400000); return `${d.getMonth()+1}/${d.getDate()}` })
-    const buckets: number[][] = Array.from({length:30}, () => [])
-    responded.forEach(s => {
-      const dAgo = Math.floor((Date.now()-new Date(s.scanned_at).getTime())/86400000)
-      const idx = 29 - dAgo
-      if (idx >= 0 && idx < 30) buckets[idx].push(s.latency_ms!)
-    })
-    const avg = buckets.map(b => b.length ? Math.round(b.reduce((a,v)=>a+v,0)/b.length) : 0)
-    if (hasRealData) return { latLabels: labels, latAvg: avg, latMin: avg.map(v=>Math.round(v*.7)), latMax: avg.map(v=>Math.round(v*1.4)) }
-
-    // Fallback: use discovered host latency as a single average point
-    const discLat = discovered.filter(h => h.responded && h.latency_ms != null).map(h => h.latency_ms!)
-    if (discLat.length) {
-      const avg = Math.round(discLat.reduce((a, v) => a + v, 0) / discLat.length)
-      const filled = labels.map((_, i) => i === labels.length - 1 ? avg : 0)
-      return { latLabels: labels, latAvg: filled, latMin: filled.map(v => Math.round(v * 0.7)), latMax: filled.map(v => Math.round(v * 1.3)) }
-    }
-    return { latLabels: labels, latAvg: Array(labels.length).fill(0), latMin: Array(labels.length).fill(0), latMax: Array(labels.length).fill(0) }
-  }, [period, scanData, discovered])
+  }, [av, period])
 
   // ── Device Performance Summary ───────────────────────────────
-  // Build per-IP average latency from real scan_results data
-  const scanLatencyByIp = useMemo(() => {
-    const map = new Map<string, number[]>()
-    scanData.filter(s => s.responded && s.latency_ms != null).forEach(s => {
-      if (!map.has(s.ip)) map.set(s.ip, [])
-      map.get(s.ip)!.push(s.latency_ms!)
-    })
-    const avg = new Map<string, number>()
-    map.forEach((vals, ip) => avg.set(ip, Math.round(vals.reduce((a,v)=>a+v,0)/vals.length)))
-    return avg
-  }, [scanData])
-
   const perfRows: DevicePerfRow[] = useMemo(() => {
-    const managed = devices.map(d => {
-      const s = slaData.find(r => r.device_name === d.name)
-      const uptimePct = s ? Number(s.uptime_pct) : d.status==='up'?99.9:d.status==='warn'?80:5
-      const alertCount = pAlerts.filter(a =>
-        a.meta?.includes(d.name) || a.meta?.includes(d.ip) || a.title.includes(d.name)
-      ).length
-      const latency = d.status === 'down' ? null : (scanLatencyByIp.get(d.ip) ?? null)
-      return { name: d.name, ip: d.ip, type: d.type, location: d.location, uptimePct, latency, alertCount }
-    })
-    const disc = discovered.map(h => ({
-      name: h.hostname ?? h.vendor ?? h.ip,
-      ip: h.ip,
-      type: h.device_type ?? h.scan_type.toUpperCase(),
-      location: '—',
-      uptimePct: h.responded ? 99.9 : 0,
-      latency: h.latency_ms ?? (scanLatencyByIp.get(h.ip) ?? null),
-      alertCount: pAlerts.filter(a => a.meta?.includes(h.ip)).length,
-    }))
-    return [...managed, ...disc].sort((a,b) => a.uptimePct - b.uptimePct)
-  }, [devices, slaData, pAlerts, scanLatencyByIp, discovered])
+    const counts = new Map<string, number>()
+    pAlerts.forEach(a => { if (a.severity !== 'info') counts.set(alertKey(a), (counts.get(alertKey(a)) ?? 0) + 1) })
+    return fDevices.map(d => {
+      const a = av?.devices[d.id]
+      return {
+        name: d.name, ip: d.ip, type: d.type, location: isUnassigned(d.location) ? 'Unassigned' : d.location,
+        status: STATUS_LABEL[d.status] ?? d.status,
+        uptimePct: a?.uptimePct ?? null, downMin: a?.downMin ?? 0, latency: a?.avgLatencyMs ?? null,
+        alertCount: (counts.get(d.name) ?? 0) + (d.name !== d.ip ? counts.get(d.ip) ?? 0 : 0),
+      }
+    }).sort((x, y) => (x.uptimePct ?? 101) - (y.uptimePct ?? 101) || y.alertCount - x.alertCount)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fDevices, av, pAlerts])
+
+  // ── Critical incidents (urgent issues, with duration) ────────
+  const incidents = useMemo(() => (av?.incidents ?? []).filter(i =>
+    !filtering || (!!i.ip && fIps.has(i.ip)) || (!!i.device && fNames.has(i.device))), [av, filtering, fIps, fNames])
+  const openIncidents = incidents.filter(i => i.open).length
+  const visibleInc = showAllInc ? incidents : incidents.slice(0, 10)
 
   const visibleRows = showAll ? perfRows : perfRows.slice(0, 10)
 
@@ -444,10 +416,34 @@ export default function ReportsPage() {
 
       {/* ── 4 KPI tiles ── */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12, marginBottom: 20 }}>
-        <KpiTile label="Devices Monitored" value={devicesMonitored} sub={`${devices.length} managed · ${discovered.length} discovered`} iconBg="rgba(47,129,247,.18)" icon="🖥" />
-        <KpiTile label="Avg Uptime"        value={`${avgUptime}%`}  sub="Network-wide availability" iconBg="rgba(34,197,94,.18)"  icon="📶" />
+        <KpiTile label="Devices Monitored" value={devicesMonitored} sub={`${devicesMonitored - discoveredCount} added · ${discoveredCount} discovered`} iconBg="rgba(47,129,247,.18)" icon="🖥" />
+        <KpiTile label="Avg Uptime"        value={avgUptime === '—' ? '—' : `${avgUptime}%`}  sub={`${measuredDevs.length} device(s) · ${measuredNote}`} iconBg="rgba(34,197,94,.18)"  icon="📶" />
         <KpiTile label="Avg Latency"       value={avgLatency === '—' ? '—' : `${avgLatency} ms`} sub="Mean ICMP response time" iconBg="rgba(210,153,34,.18)" icon="⚡" />
-        <KpiTile label="Total Alerts"      value={totalAlerts}      sub="Events in selected period"  iconBg="rgba(248,81,73,.18)"  icon="🔔" />
+        <KpiTile label="Total Alerts"      value={totalAlerts}      sub={`${critCount} critical · ${warnCount} warning`}  iconBg="rgba(248,81,73,.18)"  icon="🔔" />
+      </div>
+
+      {/* ── Filters ── */}
+      <div className="card" style={{ marginBottom: 20 }}>
+        <div className="card-body" style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', padding: '12px 16px' }}>
+          <strong style={{ fontSize: 13 }}>Filter</strong>
+          <select suppressHydrationWarning className="form-select" style={{ width: 'auto' }} value={typeF} onChange={e => setTypeF(e.target.value)}>
+            <option value="">All device types</option>
+            {typeOptions.map(t => <option key={t}>{t}</option>)}
+          </select>
+          <select suppressHydrationWarning className="form-select" style={{ width: 'auto' }} value={locF} onChange={e => setLocF(e.target.value)}>
+            <option value="">All locations</option>
+            {locOptions.map(l => <option key={l}>{l}</option>)}
+          </select>
+          <select suppressHydrationWarning className="form-select" style={{ width: 'auto' }} value={statusF} onChange={e => setStatusF(e.target.value)}>
+            <option value="">Any status</option>
+            {['up', 'warn', 'unreachable', 'down', 'unknown', 'maint'].map(s => <option key={s} value={s}>{STATUS_LABEL[s]} (now)</option>)}
+          </select>
+          {filtering && <button suppressHydrationWarning className="btn btn-sm" onClick={() => { setTypeF(''); setLocF(''); setStatusF('') }}>Clear</button>}
+          <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--text3)' }}>
+            {filtering ? `${fDevices.length} of ${devices.length} devices` : `${devices.length} devices`} · alerts, uptime, incidents and the tables follow the filter
+          </span>
+        </div>
+        {availErr && <div style={{ padding: '0 16px 12px', fontSize: 12, color: 'var(--crit)' }}>Measurements unavailable: {availErr}</div>}
       </div>
 
       {/* ── Charts row 1: Latency Trend + Alert Breakdown ── */}
@@ -455,10 +451,14 @@ export default function ReportsPage() {
         <div className="card">
           <div className="card-header">
             Latency Trend
-            <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)' }}>Avg response time over time</span>
+            <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)' }}>
+              Ping time of all devices, {period === '24h' ? 'hourly' : period === '7d' ? 'every 6 h' : `daily · last ${av?.historyDays ?? 7} days kept`}
+            </span>
           </div>
           <div className="card-body">
-            <LatencyTrendChart key={period} labels={latLabels} avg={latAvg} min={latMin} max={latMax} />
+            {latLabels.length
+              ? <LatencyTrendChart key={`${period}-${latLabels.length}`} labels={latLabels} avg={latAvg} min={latMin} max={latMax} />
+              : <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>{av ? 'No latency measured in this period' : 'Loading measurements…'}</div>}
           </div>
         </div>
         <div className="card">
@@ -479,7 +479,7 @@ export default function ReportsPage() {
         <div style={{ fontSize: 12, color: 'rgba(255,255,255,.5)', marginBottom: 20 }}>Historical incident patterns, peak failure windows, and proactive maintenance insights.</div>
         <div style={{ display: 'flex', gap: 32, flexWrap: 'wrap' }}>
           <TrendKpi label="Avg Resolution"   value={avgResolution}             sub="Mean time to resolve incidents" accent="#fff" />
-          <TrendKpi label="Resolution Rate"  value={resolutionRate}            sub={`${resolvedAlerts.length} of ${totalAlerts} alerts resolved`} accent="#4ade80" />
+          <TrendKpi label="Resolution Rate"  value={resolutionRate}            sub={`${resolvedAlerts.length} of ${problems.length} problems resolved`} accent="#4ade80" />
           <TrendKpi label="Most Problematic" value={mostProblematic.name}      sub={mostProblematic.count ? `${mostProblematic.count} alerts in period` : 'No alerts in period'} accent="#fbbf24" />
           <TrendKpi label="Peak Failure Hour" value={peakHourLabel}            sub="Most incidents occur at"       accent="#f87171" />
         </div>
@@ -512,16 +512,20 @@ export default function ReportsPage() {
             <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)' }}>By incident count</span>
           </div>
           <div className="card-body">
-            <TopDevicesChart key={period} labels={topLabels} counts={topCounts} />
+            {topLabels.length
+              ? <TopDevicesChart key={`${period}-${topLabels.join()}`} labels={topLabels} counts={topCounts} />
+              : <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>No critical or warning alerts in this period</div>}
           </div>
         </div>
         <div className="card">
           <div className="card-header">
             Location Health
-            <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)' }}>Uptime by building</span>
+            <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)' }}>Measured uptime by location</span>
           </div>
           <div className="card-body">
-            <LocationHealthChart key={period} labels={locLabels} uptime={locUptime} downtime={locDowntime} />
+            {locLabels.length
+              ? <LocationHealthChart key={`${period}-${locLabels.join()}`} labels={locLabels} uptime={locUptime} downtime={locDowntime} />
+              : <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>{av ? 'No measurements in this period' : 'Loading measurements…'}</div>}
           </div>
         </div>
       </div>
@@ -530,11 +534,62 @@ export default function ReportsPage() {
       <div className="card" style={{ marginBottom: 20 }}>
         <div className="card-header">
           Device Uptime vs Downtime
-          <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)' }}>Percentage of polling intervals per device</span>
+          <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)' }}>Share of measured minutes Online · least available first (up to 20)</span>
         </div>
         <div className="card-body">
-          <UptimeDowntimeChart key={period} labels={uptimeLabels} uptime={uptimeUp} downtime={uptimeDown} />
+          {uptimeLabels.length
+            ? <UptimeDowntimeChart key={`${period}-${uptimeLabels.join()}`} labels={uptimeLabels} uptime={uptimeUp} downtime={uptimeDown} />
+            : <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>{av ? 'No measurements in this period' : 'Loading measurements…'}</div>}
         </div>
+      </div>
+
+      {/* ── Critical incidents (urgent network issues) ── */}
+      <div className="card" style={{ marginBottom: 20 }}>
+        <div className="card-header">
+          Critical Incidents
+          <span style={{ fontSize: 11, color: 'var(--text3)', fontWeight: 400 }}>
+            {incidents.length} in this period · {openIncidents} still open · from the agent&apos;s alerts
+          </span>
+          <div className="card-header-actions">
+            <button suppressHydrationWarning className="btn btn-sm" disabled={!incidents.length} onClick={() => downloadCSV(
+              `incidents-${period}-${new Date().toISOString().slice(0, 10)}.csv`,
+              ['Incident', 'Device', 'IP', 'Location', 'Started', 'Resolved', 'Duration (min)', 'Detected by', 'Cause'],
+              incidents.map(i => [i.title, i.device, i.ip, i.location, new Date(i.startedAt).toLocaleString(), i.resolvedAt ? new Date(i.resolvedAt).toLocaleString() : 'open',
+                Math.round(i.durationMs / 60_000), i.method, i.rootCause]))}>↓ Export CSV</button>
+          </div>
+        </div>
+        <div style={{ overflowX: 'auto' }}>
+          <table className="tbl">
+            <thead><tr><th>Incident</th><th>Location</th><th>Started</th><th>Duration</th><th>Detected by</th><th>Cause</th></tr></thead>
+            <tbody>
+              {visibleInc.map(i => (
+                <tr key={i.id}>
+                  <td>
+                    <div style={{ fontWeight: 500 }}>{i.title}</div>
+                    <div className="mono" style={{ fontSize: 11, color: 'var(--text3)' }}>{i.ip ?? '—'}</div>
+                  </td>
+                  <td style={{ fontSize: 12, color: 'var(--text2)' }}>{i.location ?? '—'}</td>
+                  <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{new Date(i.startedAt).toLocaleString()}</td>
+                  <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+                    {i.open ? <span className="chip chip-crit">Open · {fmtDur(i.durationMs)}</span> : fmtDur(i.durationMs)}
+                  </td>
+                  <td style={{ fontSize: 12, color: 'var(--text2)' }}>{i.method ?? '—'}</td>
+                  <td style={{ fontSize: 12, color: 'var(--text2)', maxWidth: 320 }}>{i.rootCause ?? '—'}</td>
+                </tr>
+              ))}
+              {!incidents.length && (
+                <tr><td colSpan={6} style={{ textAlign: 'center', padding: 24, color: 'var(--text3)' }}>{av ? 'No critical incidents in this period.' : 'Loading…'}</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        {incidents.length > 10 && (
+          <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', textAlign: 'center' }}>
+            <button suppressHydrationWarning className="btn btn-sm" onClick={() => setShowAllInc(v => !v)}>
+              {showAllInc ? '↑ Show Less' : `↓ Show All Incidents (${incidents.length - 10} more)`}
+            </button>
+          </div>
+        )}
       </div>
 
       {/* ── SNMP Devices (hidden when there are no SNMP devices) ── */}
@@ -613,7 +668,7 @@ export default function ReportsPage() {
       <div className="card">
         <div className="card-header">
           Device Performance Summary
-          <span style={{ fontSize: 11, color: 'var(--text3)', fontWeight: 400 }}>Sorted by uptime (worst first)</span>
+          <span style={{ fontSize: 11, color: 'var(--text3)', fontWeight: 400 }}>Measured uptime, worst first · {measuredNote}</span>
           <div className="card-header-actions">
             <button suppressHydrationWarning className="btn btn-sm" onClick={() => exportCSV(perfRows, period)}>↓ Export CSV</button>
           </div>
@@ -624,8 +679,10 @@ export default function ReportsPage() {
               <tr>
                 <th>Device Name</th>
                 <th>Type</th>
-                <th>Building / Floor</th>
+                <th>Location</th>
+                <th>Status</th>
                 <th>Uptime %</th>
+                <th>Downtime</th>
                 <th>Avg Latency</th>
                 <th>Alerts</th>
               </tr>
@@ -639,7 +696,9 @@ export default function ReportsPage() {
                   </td>
                   <td><span className="tag">{r.type}</span></td>
                   <td style={{ color: 'var(--text2)', fontSize: 12 }}>{r.location || '—'}</td>
+                  <td style={{ fontSize: 12 }}>{r.status}</td>
                   <td><UptimeBadge pct={r.uptimePct} /></td>
+                  <td style={{ color: 'var(--text2)', fontSize: 12 }}>{r.uptimePct !== null ? fmtMinutes(r.downMin) : '—'}</td>
                   <td style={{ color: 'var(--text2)', fontSize: 12 }}>
                     {r.latency != null ? `${r.latency} ms` : '—'}
                   </td>
@@ -652,7 +711,7 @@ export default function ReportsPage() {
                 </tr>
               ))}
               {perfRows.length === 0 && (
-                <tr><td colSpan={6} style={{ textAlign:'center', padding:24, color:'var(--text3)' }}>No devices found.</td></tr>
+                <tr><td colSpan={8} style={{ textAlign:'center', padding:24, color:'var(--text3)' }}>No devices found.</td></tr>
               )}
             </tbody>
           </table>
@@ -705,7 +764,7 @@ function ReportSnapshotsPanel({ generating, genMsg, onGenerate }: { generating: 
       <div className="card-header">
         Saved Report Snapshots
         <span style={{ marginLeft: 8, fontWeight: 400, fontSize: 11, color: 'var(--text3)' }}>
-          Auto-generated daily · also runs with PingMonitor cycle
+          Made daily by the monitoring agent (and emailed to recipients with &quot;daily report&quot; on) · or on demand
         </span>
         <div className="card-header-actions">
           {genMsg && (

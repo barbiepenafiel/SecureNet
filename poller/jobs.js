@@ -7,6 +7,7 @@
  * writes the result back:
  *   probe            Add Device: check one IP by ICMP / ARP / SNMP / DNS
  *   config_snapshot  Config Backup: read system + interface info over SNMP
+ *   email_test       Settings: send a test email with the agent's SMTP settings
  * Read-only on the devices. Inputs are validated here as well as in the
  * dashboard, so nothing unexpected ever reaches the shell.
  */
@@ -103,6 +104,9 @@ const HANDLERS = {
     }
     return { snapshots }
   },
+
+  // Settings → Send Test Email (SMTP settings live on the agent)
+  email_test: () => require('./notify').sendTest(),
 }
 
 // ── Loop ─────────────────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 
 export const AGENT_FRESH_MS = 60_000   // an agent that reported in the last minute is online
 
-export type AgentJobType = 'probe' | 'config_snapshot'
+export type AgentJobType = 'probe' | 'config_snapshot' | 'email_test'
 
 // Is an agent reporting right now?
 export async function agentOnline(db: SupabaseClient): Promise<boolean> {

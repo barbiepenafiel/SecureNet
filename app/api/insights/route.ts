@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
+import core from '@/poller/report-core'
 
 export const runtime = 'nodejs'
 
@@ -72,7 +73,7 @@ function generateInsights(
       }
     })
     worstSla.slice(0, 2).forEach(s => {
-      lines.push(`• ${s.device_name}: SLA at ${s.uptime_pct}% (${s.incidents} incidents) — below 99.5% target.`)
+      lines.push(`• ${s.device_name}: ${s.uptime_pct}% available in the last 24h (${s.incidents} critical incidents) — below the 99.5% target.`)
     })
   }
   lines.push('')
@@ -122,15 +123,27 @@ function streamText(text: string): Response {
 export async function POST() {
   const db = adminDb()
 
-  const [devRes, alertRes, slaRes] = await Promise.all([
+  // Availability measured by the agent over the last 24 h (latency_samples)
+  // and critical incidents per device — not the old sla_data table
+  const since = new Date(Date.now() - 86_400_000).toISOString()
+  const [devRes, alertRes, allDevs, avail, inc] = await Promise.all([
     withTimeout(db.from('devices').select('name,type,ip,status,cpu,mem').order('cpu', { ascending: false }).limit(20), 4000),
     withTimeout(db.from('alerts').select('title,severity').eq('acked', false).eq('suppressed', false).order('created_at', { ascending: false }).limit(20), 4000),
-    withTimeout(db.from('sla_data').select('device_name,uptime_pct,incidents').order('uptime_pct').limit(10), 4000),
+    withTimeout(db.from('devices').select('id,name'), 4000),
+    withTimeout(core.deviceAvailability(db, since), 6000),
+    withTimeout(core.incidents(db, since, 500), 4000),
   ])
 
   const devices = (devRes?.data ?? []) as { name: string; type: string; ip: string; status: string; cpu: number; mem: number }[]
   const alerts  = (alertRes?.data ?? []) as { severity: string; title: string }[]
-  const sla     = (slaRes?.data ?? []) as { device_name: string; uptime_pct: number; incidents: number }[]
+  const incidentsBy = new Map<string, number>()
+  for (const i of inc ?? []) if (i.device) incidentsBy.set(i.device, (incidentsBy.get(i.device) ?? 0) + 1)
+  const sla = ((allDevs?.data ?? []) as { id: string; name: string }[])
+    .map(d => ({ d, a: avail?.get(d.id) }))
+    .filter(x => x.a && x.a.uptimePct !== null)
+    .map(x => ({ device_name: x.d.name, uptime_pct: x.a!.uptimePct as number, incidents: incidentsBy.get(x.d.name) ?? 0 }))
+    .sort((a, b) => a.uptime_pct - b.uptime_pct)
+    .slice(0, 10)
 
   const text = generateInsights(devices, alerts, sla)
   return streamText(text)

@@ -11,7 +11,83 @@ import { ROLE_LABEL, type Profile, type Role } from '@/lib/roles'
 type SettingsTab = 'notif' | 'roles' | 'manage' | 'maint' | 'disc' | 'integrations'
 const SETTINGS_TABS: SettingsTab[] = ['notif', 'roles', 'manage', 'maint', 'disc', 'integrations']
 
-import type { SmtpStatus } from '@/lib/database.types'
+import type { SmtpStatus, NotificationRecipient } from '@/lib/database.types'
+
+// Who gets alert emails and the daily report (notification_recipients)
+function RecipientsPanel() {
+  const [list, setList] = useState<NotificationRecipient[] | null>(null)
+  const [missing, setMissing] = useState(false)
+  const [form, setForm] = useState({ email: '', name: '', min_severity: 'crit' as 'crit' | 'warn', daily_report: true })
+  const [err, setErr] = useState<string | null>(null)
+
+  async function load() {
+    const { data, error } = await supabase.from('notification_recipients').select('*').order('created_at')
+    if (error) { setMissing(/schema cache|does not exist|relation/i.test(error.message)); setList([]); return }
+    setMissing(false)
+    setList((data ?? []) as NotificationRecipient[])
+  }
+  useEffect(() => { load() }, [])
+
+  async function add() {
+    setErr(null)
+    const email = form.email.trim().toLowerCase()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setErr('Enter a valid email address'); return }
+    const { error } = await supabase.from('notification_recipients')
+      .insert({ email, name: form.name.trim() || null, min_severity: form.min_severity, daily_report: form.daily_report })
+    if (error) { setErr(/duplicate|unique/i.test(error.message) ? 'That address is already on the list' : error.message); return }
+    setForm({ email: '', name: '', min_severity: 'crit', daily_report: true })
+    load()
+  }
+  async function patch(id: string, p: Partial<NotificationRecipient>) {
+    await supabase.from('notification_recipients').update(p).eq('id', id)
+    load()
+  }
+  async function remove(id: string) {
+    await supabase.from('notification_recipients').delete().eq('id', id)
+    load()
+  }
+
+  if (missing) return (
+    <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 14 }}>
+      Run <code>supabase/migration_objectives.sql</code> in Supabase to manage recipients here. Until then the agent emails the addresses in its <code>SMTP_TO</code> setting.
+    </div>
+  )
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>Recipients</div>
+      {list && !list.length && <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 8 }}>No recipients yet — the agent falls back to its <code>SMTP_TO</code> setting.</div>}
+      {list?.map(r => (
+        <div key={r.id} style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', padding: '6px 0', borderTop: '1px solid var(--border)', fontSize: 12 }}>
+          <span style={{ flex: '1 1 180px', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', opacity: r.enabled ? 1 : .5 }}>
+            <strong>{r.email}</strong>{r.name ? ` · ${r.name}` : ''}
+          </span>
+          <select suppressHydrationWarning className="form-select" style={{ width: 'auto', fontSize: 12, padding: '2px 6px' }}
+            value={r.min_severity} onChange={e => patch(r.id, { min_severity: e.target.value as 'crit' | 'warn' })}>
+            <option value="crit">Critical only</option>
+            <option value="warn">Critical + warning</option>
+          </select>
+          <label style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+            <input suppressHydrationWarning type="checkbox" checked={r.daily_report} onChange={e => patch(r.id, { daily_report: e.target.checked })} />Daily report
+          </label>
+          <label style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+            <input suppressHydrationWarning type="checkbox" checked={r.enabled} onChange={e => patch(r.id, { enabled: e.target.checked })} />On
+          </label>
+          <button suppressHydrationWarning className="btn btn-sm" style={{ color: 'var(--crit)' }} onClick={() => remove(r.id)}>Remove</button>
+        </div>
+      ))}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+        <input suppressHydrationWarning className="form-input" style={{ flex: '2 1 180px' }} placeholder="it-team@dnsc.edu.ph" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} />
+        <input suppressHydrationWarning className="form-input" style={{ flex: '1 1 110px' }} placeholder="Name (optional)" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
+        <select suppressHydrationWarning className="form-select" style={{ flex: '1 1 140px' }} value={form.min_severity} onChange={e => setForm(f => ({ ...f, min_severity: e.target.value as 'crit' | 'warn' }))}>
+          <option value="crit">Critical only</option>
+          <option value="warn">Critical + warning</option>
+        </select>
+        <button suppressHydrationWarning className="btn btn-sm btn-primary" onClick={add}>Add</button>
+      </div>
+      {err && <div style={{ fontSize: 12, color: 'var(--crit)', marginTop: 6 }}>{err}</div>}
+    </div>
+  )
+}
 
 function Toggle({ label, sub, defaultChecked }: { label: string; sub: string; defaultChecked?: boolean }) {
   const [on, setOn] = useState(defaultChecked ?? false)
@@ -177,7 +253,7 @@ const DEFAULT_CFG: Omit<AlertConfig, 'id' | 'updated_at' | 'updated_by'> = {
   cpu_warn_pct: 80, cpu_crit_pct: 95,
   mem_warn_pct: 85, mem_crit_pct: 95,
   latency_warn_ms: 100, latency_crit_ms: 250,
-  flap_threshold: 3, grace_period_min: 5,
+  flap_threshold: 3, grace_period_min: 0,
 }
 
 export default function SettingsPage() {
@@ -223,7 +299,7 @@ export default function SettingsPage() {
       before_val: 'old', after_val: JSON.stringify(cfg),
     })
     setCfgSaving(false)
-    setCfgMsg(res.ok ? '✓ Thresholds saved.' : '✗ Failed — run supabase/alert_enhancements.sql first.')
+    setCfgMsg(res.ok ? '✓ Thresholds saved.' : '✗ Failed — run supabase/migration_objectives.sql first.')
     setTimeout(() => setCfgMsg(null), 4000)
   }
 
@@ -254,20 +330,25 @@ export default function SettingsPage() {
                   fontSize: 12,
                 }}>
                   {smtp.configured
-                    ? <>✓ SMTP configured — <strong>{smtp.user}</strong> via {smtp.host}:{smtp.port} → <strong>{smtp.to ?? smtp.user}</strong></>
-                    : <>✗ SMTP not configured. Add these to <code>.env.local</code> and restart:</>
+                    ? <>✓ Email is on — {smtp.status}</>
+                    : !smtp.migrated
+                      ? <>✗ Run <code>supabase/migration_objectives.sql</code> in Supabase, then restart the agent.</>
+                      : !smtp.status
+                        ? <>✗ No email status from the agent yet{smtp.agentOnline ? ' — restart the agent' : ' (agent offline)'}.</>
+                        : <>✗ Email is off — add these to the agent&apos;s <code>.env</code> (on the monitoring laptop) and run <code>pm2 restart securenet</code>:</>
                   }
-                  {!smtp.configured && (
+                  {smtp.migrated && smtp.status && !smtp.configured && (
                     <pre style={{ margin: '8px 0 0', fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text2)', whiteSpace: 'pre-wrap' }}>
 {`SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
 SMTP_USER=your@email.com
-SMTP_PASS=your-app-password
-SMTP_TO=alerts-recipient@email.com`}
+SMTP_PASS=your-app-password`}
                     </pre>
                   )}
+                  {smtp.configured && !smtp.agentOnline && <div style={{ marginTop: 4, color: 'var(--warn)' }}>Agent offline — emails resume when it reports again.</div>}
                 </div>
               )}
+              <RecipientsPanel />
               <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
                 <button suppressHydrationWarning
                   className="btn btn-sm btn-primary"
@@ -278,7 +359,7 @@ SMTP_TO=alerts-recipient@email.com`}
                       const r = await fetch('/api/notify/email', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
                       const d = await r.json()
                       setEmailMsg(r.ok
-                        ? (d.sent === 0 ? '✓ SMTP works — no active alerts to send right now' : `✓ Sent ${d.sent} alert(s) to ${d.to}`)
+                        ? `✓ Test email sent to ${d.to}${d.sent ? ` (with ${d.sent} open alert${d.sent === 1 ? '' : 's'})` : ''}`
                         : `✗ ${d.error}`)
                     } catch { setEmailMsg('✗ Request failed') }
                     finally { setTestingEmail(false); setTimeout(() => setEmailMsg(null), 6000) }
@@ -289,7 +370,7 @@ SMTP_TO=alerts-recipient@email.com`}
                 {emailMsg && <span style={{ fontSize: 12, alignSelf: 'center', color: emailMsg.startsWith('✓') ? 'var(--ok)' : 'var(--crit)' }}>{emailMsg}</span>}
               </div>
               <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 14 }}>
-                Email is sent automatically when a critical alert fires (after {smtp?.cooldown_min ?? 30} min cooldown per alert). Configure SMTP credentials in <code>.env.local</code>.
+                The monitoring agent emails each new critical alert (and warnings, for recipients who chose them) within about 20 seconds, an incident report when an emailed incident is resolved, and the daily report each morning — no dashboard needs to be open. Each alert is emailed once.
               </div>
               <Toggle label="Browser Push Notifications" sub="Alert shown in OS notification center" defaultChecked />
               <Toggle label="Telegram"        sub="@nw_alerts_bot → #securenet-alerts (configure via webhook)" />
@@ -316,7 +397,7 @@ SMTP_TO=alerts-recipient@email.com`}
                 <div className="form-group"><label className="form-label">Grace Period (min before alert)</label><input suppressHydrationWarning className="form-input" type="number" value={cfg.grace_period_min} onChange={setN('grace_period_min')} /></div>
               </div>
               <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 10 }}>
-                Grace period prevents alerts for temporary flaps. Flap threshold ignores rapid state changes.
+                CPU / memory: alert while an SNMP device is at or above the level (critical above the critical level). Flap threshold: a device that goes offline and comes back this many times in 5 minutes raises a &quot;flapping&quot; warning. Grace period: minutes a device must stay offline before the offline alert (0 = alert as soon as it is confirmed offline). Used by the agent within a minute of saving.
               </div>
               {cfgMsg && <div style={{ marginBottom: 10, fontSize: 13, color: cfgMsg.startsWith('✓') ? 'var(--ok)' : 'var(--crit)' }}>{cfgMsg}</div>}
               <button suppressHydrationWarning className="btn btn-primary" onClick={saveThresholds} disabled={cfgSaving}>

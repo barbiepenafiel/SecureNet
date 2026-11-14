@@ -29,6 +29,11 @@ export interface Device {
   last_seen?: string | null
   last_method?: string | null
   room_id?: string | null      // floor plan room (supabase/migration_floor_rooms.sql)
+  // Topology link (supabase/migration_objectives.sql)
+  parent_id?: string | null
+  parent_port?: string | null
+  parent_source?: 'snmp' | 'gateway' | 'manual' | null
+  parent_updated_at?: string | null
 }
 
 export interface AgentStatus {
@@ -168,7 +173,18 @@ export interface ScanResult {
   scanned_at: string
 }
 
-export interface SmtpStatus { configured: boolean; host: string | null; port: string; user: string | null; to: string | null; cooldown_min: number }
+// /api/notify/email — email is sent by the agent with its own SMTP settings
+export interface SmtpStatus { configured: boolean; status: string | null; agentOnline: boolean; migrated: boolean }
+
+export interface NotificationRecipient {
+  id: string
+  email: string
+  name: string | null
+  min_severity: 'crit' | 'warn'
+  daily_report: boolean
+  enabled: boolean
+  created_at: string
+}
 
 export interface StatusEvent {
   id: number

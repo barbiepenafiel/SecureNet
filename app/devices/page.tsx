@@ -193,8 +193,9 @@ function AddDiscoveredModal({ scan, onClose, onSaved }: {
   scan: ScanResult; onClose: () => void; onSaved: () => void
 }) {
   const [form, setForm] = useState({
-    name: scan.hostname ?? '', type: 'Server',
-    ip: scan.ip, location: 'Building A',
+    // Type from the scan's MAC-vendor lookup; location stays unassigned until someone sets it
+    name: scan.hostname ?? '', type: scan.device_type ?? 'Client',
+    ip: scan.ip, location: 'Unassigned',
   })
   const [saving, setSaving] = useState(false)
   const [err,    setErr]    = useState<string | null>(null)
@@ -235,7 +236,7 @@ function AddDiscoveredModal({ scan, onClose, onSaved }: {
         <div className="form-group">
           <label className="form-label">Type</label>
           <select suppressHydrationWarning className="form-select" value={form.type} onChange={set('type')}>
-            {['Firewall','Router','Switch','Access Point','Server'].map(t => <option key={t}>{t}</option>)}
+            {[...new Set(['Firewall','Router','Switch','Access Point','Server','Computer','Client', form.type])].map(t => <option key={t}>{t}</option>)}
           </select>
         </div>
       </div>
@@ -247,7 +248,7 @@ function AddDiscoveredModal({ scan, onClose, onSaved }: {
         <div className="form-group">
           <label className="form-label">Location</label>
           <select suppressHydrationWarning className="form-select" value={form.location} onChange={set('location')}>
-            {['Building A','Building B','Building C','Data Center','Library','Admin Building'].map(l => (
+            {['Unassigned','Building A','Building B','Building C','Data Center','Library','Admin Building'].map(l => (
               <option key={l}>{l}</option>
             ))}
           </select>
