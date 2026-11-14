@@ -82,6 +82,13 @@ const STATUS_HELP:  Record<string, string> = {
   unknown: 'The agent can’t see this device’s network right now',
 }
 
+// last_method is the reachability check (ICMP is tried first); SNMP polling runs
+// separately and records its result in snmp_status — show both when SNMP answers
+function checkMethods(d: Device): string | null {
+  const snmpOk = (d as Device & { snmp_status?: string | null }).snmp_status === 'responding'
+  return [d.last_method, snmpOk && d.last_method !== 'SNMP' ? 'SNMP' : null].filter(Boolean).join(' + ') || null
+}
+
 function statusChip(s: string, method?: string | null) {
   return (
     <span className={`chip ${STATUS_CLS[s] ?? 'chip-off'}`} title={STATUS_HELP[s]}>
@@ -548,7 +555,7 @@ export default function DevicesPage() {
                       <td>{isUnassigned(d.location)
                         ? <span style={{ color: 'var(--text3)', fontStyle: 'italic' }}>Unassigned</span>
                         : d.location}</td>
-                      <td>{statusChip(status, status === 'up' ? d.last_method : null)}</td>
+                      <td>{statusChip(status, status === 'up' ? checkMethods(d) : null)}</td>
                       <td style={{ fontSize: 12, color: 'var(--text2)' }} title={d.first_seen ? new Date(d.first_seen).toLocaleString() : undefined}>
                         {d.first_seen ? new Date(d.first_seen).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '—'}
                       </td>
@@ -628,12 +635,14 @@ export default function DevicesPage() {
               ['Hostname',  detail.hostname ?? '—'],
               ['Network',   detail.subnet ?? '—'],
               ['Location',  isUnassigned(detail.location) ? 'Unassigned' : detail.location],
-              ['Status',    `${STATUS_LABEL[shownStatus(detail)] ?? detail.status}${detail.last_method ? ` (last via ${detail.last_method})` : ''}`],
+              ['Status',    `${STATUS_LABEL[shownStatus(detail)] ?? detail.status}${checkMethods(detail) ? ` (last via ${checkMethods(detail)})` : ''}`],
               ['First detected', detail.first_seen ? new Date(detail.first_seen).toLocaleString() : '—'],
               ['Last seen', detail.last_seen ? new Date(detail.last_seen).toLocaleString() : '—'],
               ['Source',    detail.source === 'discovered' ? 'Auto-discovered' : 'Added manually'],
               ['Uptime',    detail.uptime],
-              ['CPU / Mem', detail.cpu ? `${detail.cpu}% / ${detail.mem}%` : '—'],
+              // 0% CPU is a real reading on an idle router — show it whenever SNMP has reported anything
+              ['CPU / Mem', (detail.cpu > 0 || detail.mem > 0 || (detail as Device & { snmp_status?: string | null }).snmp_status === 'responding')
+                ? `${detail.cpu ?? 0}% / ${detail.mem ?? 0}%` : '—'],
             ].map(([k, v]) => (
               <div key={k}>
                 <div className="form-label">{k}</div>
