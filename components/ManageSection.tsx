@@ -4,11 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '@/lib/supabase'
 import type { Device } from '@/lib/database.types'
 import {
-  useFloorRooms, roomOfDevice, stripRoomLabels, FLOOR_VIEWBOX, FLOORPLAN_BUILDING, type FloorRoom,
+  useFloorRooms, useFloorPlans, roomOfDevice, allSheets, roomsOfSheet, sheetsForLocation, roomsForLocation, floorLabel,
+  type FloorRoom, type FloorPlan,
 } from '@/lib/floor-rooms'
-import { FLOOR_1_SVG, FLOOR_2_SVG, RoomLabel } from '@/components/TopologyHub'
+import { RoomLabel, SheetBackground } from '@/components/TopologyHub'
 
-// Settings → Manage: device details and floor plan rooms (Network Admins only)
+// Settings → Manage: device details and floor plans / rooms (Network Admins only)
 
 const STATUS: Record<string, { label: string; cls: string }> = {
   up: { label: 'Online', cls: 'chip-ok' }, warn: { label: 'Warning', cls: 'chip-warn' },
@@ -19,14 +20,15 @@ const TYPES = ['Router', 'Switch', 'Access Point', 'Firewall', 'Server', 'Comput
 const BUILDINGS = ['Building A', 'Building B', 'Building C', 'Data Center', 'Library', 'Admin Building']
 
 export default function ManageSection() {
-  const [part, setPart] = useState<'devices' | 'lifecycle' | 'rooms'>('devices')
+  const [part, setPart] = useState<'devices' | 'rooms'>('devices')
   const { rooms, managed, reload } = useFloorRooms()
+  const { plans } = useFloorPlans()
 
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', gap: 2, padding: 3, background: 'var(--surface3)', borderRadius: 8 }}>
-          {([['devices', 'Devices'], ['lifecycle', 'Lifecycle'], ['rooms', 'Floor plan rooms']] as const).map(([k, l]) => (
+          {([['devices', 'Devices'], ['rooms', 'Floor plans']] as const).map(([k, l]) => (
             <button suppressHydrationWarning key={k} onClick={() => setPart(k)} style={{
               padding: '6px 16px', borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: 'pointer', border: 'none',
               background: part === k ? 'var(--surface)' : 'transparent', color: part === k ? 'var(--accent2)' : 'var(--text2)',
@@ -40,9 +42,8 @@ export default function ManageSection() {
           </span>
         )}
       </div>
-      {part === 'devices'   && <DevicesManager rooms={rooms} roomsManaged={managed}/>}
-      {part === 'lifecycle' && <LifecycleManager/>}
-      {part === 'rooms'     && <RoomsManager rooms={rooms} managed={managed} reload={reload}/>}
+      {part === 'devices' && <DevicesManager rooms={rooms} roomsManaged={managed} plans={plans}/>}
+      {part === 'rooms'   && <RoomsManager rooms={rooms} managed={managed} reload={reload}/>}
     </div>
   )
 }
@@ -52,7 +53,7 @@ export default function ManageSection() {
 // parent: '' = learned automatically by the agent, otherwise a device id (set by hand)
 type Draft = { name: string; type: string; location: string; room_id: string; maint: boolean; parent: string }
 
-function DevicesManager({ rooms, roomsManaged }: { rooms: FloorRoom[]; roomsManaged: boolean }) {
+function DevicesManager({ rooms, roomsManaged, plans }: { rooms: FloorRoom[]; roomsManaged: boolean; plans: FloorPlan[] }) {
   const [devices, setDevices] = useState<Device[]>([])
   const [drafts, setDrafts] = useState<Record<string, Draft>>({})
   const [busy, setBusy] = useState<string | null>(null)
@@ -83,8 +84,8 @@ function DevicesManager({ rooms, roomsManaged }: { rooms: FloorRoom[]; roomsMana
     if (!x.name.trim()) { setMsg({ id: d.id, text: 'Name is required', ok: false }); return }
     setBusy(d.id); setMsg(null)
     const patch: Record<string, unknown> = { name: x.name.trim(), type: x.type, location: x.location }
-    // Room only applies inside the floor-plan building
-    if (roomsManaged) patch.room_id = FLOORPLAN_BUILDING.test(x.location) && x.room_id ? x.room_id : null
+    // A room only applies inside a building that has a floor plan with that room
+    if (roomsManaged) patch.room_id = x.room_id && roomsForLocation(x.location, rooms, plans).some(r => r.id === x.room_id) ? x.room_id : null
     if (x.maint !== (d.status === 'maint')) patch.status = x.maint ? 'maint' : 'unknown'   // the agent re-checks it
     // Topology link: a device chosen by hand is kept; Automatic hands it back to the agent
     if (linksManaged && x.parent !== (d.parent_source === 'manual' ? d.parent_id ?? '' : '')) {
@@ -117,9 +118,9 @@ function DevicesManager({ rooms, roomsManaged }: { rooms: FloorRoom[]; roomsMana
   }
 
   const locations = useMemo(() =>
-    [...new Set(['Unassigned', ...BUILDINGS, ...devices.map(d => d.location).filter(Boolean)])], [devices])
+    [...new Set(['Unassigned', ...BUILDINGS, ...plans.map(p => p.building), ...devices.map(d => d.location).filter(Boolean)])], [devices, plans])
   const shown = devices.filter(d => !q || [d.name, d.ip, d.mac, d.location, d.type].filter(Boolean).join(' ').toLowerCase().includes(q.toLowerCase()))
-  const roomName = (d: Device) => roomOfDevice(d, rooms)?.label
+  const roomName = (d: Device) => roomOfDevice(d, roomsForLocation(d.location, rooms, plans))?.label
   // parent_* columns installed (supabase/migration_objectives.sql)?
   const linksManaged = devices.length > 0 && 'parent_id' in devices[0]
   const byId = useMemo(() => new Map(devices.map(d => [d.id, d])), [devices])
@@ -149,7 +150,8 @@ function DevicesManager({ rooms, roomsManaged }: { rooms: FloorRoom[]; roomsMana
           <tbody>
             {shown.map(d => {
               const x = draftOf(d)
-              const inPlanBuilding = FLOORPLAN_BUILDING.test(x.location)
+              const sheetsHere = sheetsForLocation(x.location, plans)
+              const inPlanBuilding = sheetsHere.length > 0
               const st = STATUS[d.status] ?? STATUS.unknown
               const autoRoom = !d.room_id && roomName(d)
               return (
@@ -171,11 +173,11 @@ function DevicesManager({ rooms, roomsManaged }: { rooms: FloorRoom[]; roomsMana
                   <td style={{ minWidth: 170 }}>
                     <select suppressHydrationWarning className="form-select" value={inPlanBuilding ? x.room_id : ''}
                       disabled={!inPlanBuilding || !roomsManaged} onChange={e => edit(d, { room_id: e.target.value })}
-                      title={!inPlanBuilding ? 'Rooms are available for the building with a floor plan' : undefined}>
+                      title={!inPlanBuilding ? 'Rooms are available for buildings with a floor plan (Floor plans → + Add floor plan)' : undefined}>
                       <option value="">{inPlanBuilding ? '— No room —' : '—'}</option>
-                      {[1, 2].map(f => (
-                        <optgroup key={f} label={f === 1 ? '1st Floor' : '2nd Floor'}>
-                          {rooms.filter(r => r.floor === f).map(r => <option key={r.id} value={r.id}>{r.label}</option>)}
+                      {sheetsHere.map(s => (
+                        <optgroup key={s.key} label={floorLabel(s.floor)}>
+                          {roomsOfSheet(rooms, s).map(r => <option key={r.id} value={r.id}>{r.label}</option>)}
                         </optgroup>
                       ))}
                     </select>
@@ -231,209 +233,30 @@ function DevicesManager({ rooms, roomsManaged }: { rooms: FloorRoom[]; roomsMana
   )
 }
 
-// ─── Lifecycle (model, firmware, warranty, end of maintenance / life) ────────
-
-type LcRow = {
-  id?: string; device_name: string; model: string; firmware: string; latest_fw: string
-  warranty_date: string | null; eom_date: string | null; eol_date: string | null
-}
-type LcDraft = { model: string; firmware: string; latest_fw: string; warranty_date: string; eom_date: string; eol_date: string }
-
-function LifecycleManager() {
-  const [devices, setDevices] = useState<Device[]>([])
-  const [records, setRecords] = useState<LcRow[]>([])
-  const [drafts, setDrafts]   = useState<Record<string, LcDraft>>({})
-  const [busy, setBusy]       = useState<string | null>(null)
-  const [msg, setMsg]         = useState<{ key: string; text: string; ok: boolean } | null>(null)
-  const [q, setQ]             = useState('')
-
-  const load = useCallback(async () => {
-    const [{ data: devs }, { data: lc }] = await Promise.all([
-      supabase.from('devices').select('*').order('name'),
-      supabase.from('lifecycle').select('*'),
-    ])
-    setDevices((devs ?? []) as Device[])
-    setRecords((lc ?? []) as LcRow[])
-  }, [])
-  useEffect(() => { load() }, [load])
-
-  // Same matching as the Lifecycle page: by device name, ignoring case
-  const recOf = (d: Device) => records.find(r => r.device_name.toLowerCase() === d.name.toLowerCase())
-  const orphans = records.filter(r => !devices.some(d => d.name.toLowerCase() === r.device_name.toLowerCase()))
-
-  const base = (d: Device): LcDraft => {
-    const r = recOf(d)
-    return {
-      model: r?.model ?? d.model ?? '', firmware: r?.firmware ?? d.firmware ?? '', latest_fw: r?.latest_fw ?? '',
-      warranty_date: r?.warranty_date ?? '', eom_date: r?.eom_date ?? '', eol_date: r?.eol_date ?? '',
-    }
-  }
-  const draftOf = (d: Device) => drafts[d.id] ?? base(d)
-  const edit = (d: Device, patch: Partial<LcDraft>) => setDrafts(p => ({ ...p, [d.id]: { ...draftOf(d), ...patch } }))
-  const dirty = (d: Device) => {
-    const x = drafts[d.id], b = base(d)
-    return !!x && (Object.keys(b) as (keyof LcDraft)[]).some(k => x[k] !== b[k])
-  }
-
-  async function save(d: Device) {
-    const x = draftOf(d)
-    setBusy(d.id); setMsg(null)
-    const row = {
-      device_name: recOf(d)?.device_name ?? d.name,
-      model: x.model.trim(), firmware: x.firmware.trim(), latest_fw: x.latest_fw.trim(),
-      warranty_date: x.warranty_date || null, eom_date: x.eom_date || null, eol_date: x.eol_date || null,
-    }
-    const { error } = await supabase.from('lifecycle').upsert(row, { onConflict: 'device_name' })
-    setBusy(null)
-    if (error) { setMsg({ key: d.id, text: error.message, ok: false }); return }
-    setDrafts(p => { const n = { ...p }; delete n[d.id]; return n })
-    setMsg({ key: d.id, text: 'Saved', ok: true })
-    setTimeout(() => setMsg(m => (m?.key === d.id ? null : m)), 2500)
-    load()
-  }
-
-  async function clear(d: Device) {
-    const r = recOf(d)
-    if (!r || !confirm(`Clear lifecycle details for "${d.name}"?`)) return
-    setBusy(d.id)
-    await supabase.from('lifecycle').delete().eq('device_name', r.device_name)
-    setBusy(null)
-    setDrafts(p => { const n = { ...p }; delete n[d.id]; return n })
-    load()
-  }
-
-  async function removeOrphan(r: LcRow) {
-    await supabase.from('lifecycle').delete().eq('device_name', r.device_name)
-    load()
-  }
-  async function removeAllOrphans() {
-    if (!confirm(`Remove ${orphans.length} lifecycle record(s) for devices that aren't in the inventory?`)) return
-    await supabase.from('lifecycle').delete().in('device_name', orphans.map(r => r.device_name))
-    load()
-  }
-
-  const fwState = (x: LcDraft) => !x.firmware || !x.latest_fw ? null
-    : x.firmware === x.latest_fw ? { text: 'Up to date', color: 'var(--ok)' } : { text: 'Update available', color: 'var(--warn)' }
-  const dateState = (iso: string) => {
-    if (!iso) return null
-    const days = (new Date(iso).getTime() - Date.now()) / 86_400_000
-    return days < 0 ? { text: 'Passed', color: 'var(--crit)' } : days < 90 ? { text: `${Math.ceil(days)} days left`, color: 'var(--warn)' } : null
-  }
-
-  const shown = devices.filter(d => !q || [d.name, d.ip, d.type, draftOf(d).model].join(' ').toLowerCase().includes(q.toLowerCase()))
-  const inp = { padding: '6px 8px', fontSize: 12.5 } as const
-
-  return (
-    <>
-      <div className="card">
-        <div className="card-header">
-          Lifecycle
-          <span style={{ fontWeight: 400, fontSize: 12, color: 'var(--text3)' }}>Model, firmware, warranty and end-of-life dates — shown on the Lifecycle page</span>
-          <div className="card-header-actions">
-            <input suppressHydrationWarning className="form-input" style={{ width: 200 }} placeholder="Search devices…" value={q} onChange={e => setQ(e.target.value)}/>
-          </div>
-        </div>
-        <div style={{ overflowX: 'auto' }}>
-          <table className="tbl">
-            <thead>
-              <tr><th>Device</th><th>Model</th><th>Current FW</th><th>Latest FW</th><th>Warranty Expiry</th><th>End of Maint.</th><th>End of Life</th><th></th></tr>
-            </thead>
-            <tbody>
-              {shown.map(d => {
-                const x = draftOf(d)
-                const fw = fwState(x)
-                const hasRec = !!recOf(d)
-                return (
-                  <tr key={d.id} style={dirty(d) ? { background: 'rgba(22,163,74,.05)' } : undefined}>
-                    <td style={{ minWidth: 160 }}>
-                      <strong style={{ fontSize: 13 }}>{d.name}</strong>
-                      <div className="mono" style={{ fontSize: 11, color: 'var(--text3)' }}>{d.ip} · {d.type}</div>
-                    </td>
-                    <td style={{ minWidth: 160 }}>
-                      <input suppressHydrationWarning className="form-input" style={inp} placeholder="e.g. TP-Link Archer C6" value={x.model} onChange={e => edit(d, { model: e.target.value })}/>
-                    </td>
-                    <td style={{ minWidth: 110 }}>
-                      <input suppressHydrationWarning className="form-input mono" style={inp} placeholder="1.0.4" value={x.firmware} onChange={e => edit(d, { firmware: e.target.value })}/>
-                    </td>
-                    <td style={{ minWidth: 110 }}>
-                      <input suppressHydrationWarning className="form-input mono" style={inp} placeholder="1.0.5" value={x.latest_fw} onChange={e => edit(d, { latest_fw: e.target.value })}/>
-                      {fw && <div style={{ fontSize: 10.5, color: fw.color, marginTop: 2 }}>{fw.text}</div>}
-                    </td>
-                    {(['warranty_date', 'eom_date', 'eol_date'] as const).map(k => {
-                      const ds = dateState(x[k])
-                      return (
-                        <td key={k} style={{ minWidth: 140 }}>
-                          <input suppressHydrationWarning type="date" className="form-input" style={inp} value={x[k] ?? ''} onChange={e => edit(d, { [k]: e.target.value } as Partial<LcDraft>)}/>
-                          {ds && <div style={{ fontSize: 10.5, color: ds.color, marginTop: 2 }}>{ds.text}</div>}
-                        </td>
-                      )
-                    })}
-                    <td style={{ whiteSpace: 'nowrap' }}>
-                      <button suppressHydrationWarning className="btn btn-sm btn-primary" disabled={!dirty(d) || busy === d.id} onClick={() => save(d)}>
-                        {busy === d.id ? 'Saving…' : 'Save'}
-                      </button>{' '}
-                      <button suppressHydrationWarning className="btn btn-sm" disabled={!hasRec || busy === d.id} onClick={() => clear(d)} title="Remove this device's lifecycle details">Clear</button>
-                      {msg?.key === d.id && <div style={{ fontSize: 11, marginTop: 3, color: msg.ok ? 'var(--ok)' : 'var(--crit)' }}>{msg.text}</div>}
-                    </td>
-                  </tr>
-                )
-              })}
-              {!shown.length && <tr><td colSpan={8} style={{ textAlign: 'center', padding: 24, color: 'var(--text3)' }}>No devices found.</td></tr>}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {orphans.length > 0 && (
-        <div className="card" style={{ marginTop: 14 }}>
-          <div className="card-header">
-            Records for devices not in the inventory
-            <span style={{ fontWeight: 400, fontSize: 12, color: 'var(--text3)' }}>Old or sample entries — no matching device</span>
-            <div className="card-header-actions">
-              <button suppressHydrationWarning className="btn btn-sm" style={{ color: 'var(--crit)' }} onClick={removeAllOrphans}>Remove all</button>
-            </div>
-          </div>
-          <div style={{ overflowX: 'auto' }}>
-            <table className="tbl">
-              <thead><tr><th>Device name</th><th>Model</th><th>Current FW</th><th>Latest FW</th><th>Warranty Expiry</th><th>End of Maint.</th><th>End of Life</th><th></th></tr></thead>
-              <tbody>
-                {orphans.map(r => (
-                  <tr key={r.device_name}>
-                    <td><strong>{r.device_name}</strong></td>
-                    <td>{r.model || '—'}</td>
-                    <td className="mono">{r.firmware || '—'}</td>
-                    <td className="mono">{r.latest_fw || '—'}</td>
-                    <td>{r.warranty_date ?? '—'}</td>
-                    <td>{r.eom_date ?? '—'}</td>
-                    <td>{r.eol_date ?? '—'}</td>
-                    <td><button suppressHydrationWarning className="btn btn-sm" style={{ color: 'var(--crit)' }} onClick={() => removeOrphan(r)}>Remove</button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-    </>
-  )
-}
-
-// ─── Floor plan rooms ─────────────────────────────────────────────────────────
+// ─── Floor plans and rooms ────────────────────────────────────────────────────
+// Pick a building floor (IC Building's built-in drawings or an uploaded plan),
+// add / rename / place rooms on it. "+ Add floor plan" uploads a drawing for
+// any building and floor (supabase/migration_floor_plans.sql).
 
 function RoomsManager({ rooms, managed, reload }: { rooms: FloorRoom[]; managed: boolean; reload: () => void }) {
-  const [floor, setFloor] = useState<1 | 2>(1)
+  const { plans, plansManaged, reloadPlans } = useFloorPlans()
+  const sheets = useMemo(() => allSheets(plans), [plans])
+  const [sheetKey, setSheetKey] = useState<string>('builtin-1')
+  const sheet = sheets.find(s => s.key === sheetKey) ?? sheets[0]
   const [placing, setPlacing] = useState<string | null>(null)   // room id waiting for a click on the plan
   const [labels, setLabels] = useState<Record<string, string>>({})
   const [devices, setDevices] = useState<Device[]>([])
   const [err, setErr] = useState<string | null>(null)
+  const [adding, setAdding] = useState(false)
   const svgRef = useRef<SVGSVGElement>(null)
 
   useEffect(() => { supabase.from('devices').select('*').then(({ data }) => setDevices((data ?? []) as Device[])) }, [rooms])
 
-  const [vbW, vbH] = FLOOR_VIEWBOX[floor]
-  const plan = useMemo(() => stripRoomLabels(floor === 1 ? FLOOR_1_SVG : FLOOR_2_SVG), [floor])
-  const floorRooms = rooms.filter(r => r.floor === floor)
-  const deviceCount = (r: FloorRoom) => devices.filter(d => FLOORPLAN_BUILDING.test(d.location) && roomOfDevice(d, rooms)?.id === r.id).length
+  const { vbW, vbH } = sheet
+  const floorRooms = roomsOfSheet(rooms, sheet)
+  const deviceCount = (r: FloorRoom) => devices.filter(d =>
+    sheetsForLocation(d.location, plans).some(s => s.key === sheet.key) &&
+    roomOfDevice(d, roomsForLocation(d.location, rooms, plans))?.id === r.id).length
 
   async function update(r: FloorRoom, patch: Partial<FloorRoom>) {
     setErr(null)
@@ -443,8 +266,9 @@ function RoomsManager({ rooms, managed, reload }: { rooms: FloorRoom[]; managed:
 
   async function addRoom() {
     setErr(null)
-    const { data, error } = await supabase.from('floor_rooms')
-      .insert({ floor, label: 'New room', x: Math.round(vbW / 2), y: Math.round(vbH / 2) }).select('id').single()
+    const row: Record<string, unknown> = { building: sheet.building, floor: sheet.floor, label: 'New room', x: Math.round(vbW / 2), y: Math.round(vbH / 2) }
+    if (sheet.planId) row.plan_id = sheet.planId
+    const { data, error } = await supabase.from('floor_rooms').insert(row).select('id').single()
     if (error) { setErr(error.message); return }
     reload()
     setPlacing(data.id)
@@ -455,6 +279,18 @@ function RoomsManager({ rooms, managed, reload }: { rooms: FloorRoom[]; managed:
     if (!confirm(`Delete room "${r.label}"?${n ? ` ${n} device(s) in it will become "not in a room".` : ''}`)) return
     const { error } = await supabase.from('floor_rooms').delete().eq('id', r.id)
     if (error) setErr(error.message); else reload()
+  }
+
+  async function removePlan() {
+    const plan = plans.find(p => p.id === sheet.planId)
+    if (!plan) return
+    if (!confirm(`Delete the ${floorLabel(plan.floor)} plan of ${plan.building}? Its ${floorRooms.length} room(s) are deleted too; devices in them become "not in a room".`)) return
+    setErr(null)
+    const { error } = await supabase.from('floor_plans').delete().eq('id', plan.id)
+    if (error) { setErr(error.message); return }
+    await supabase.storage.from('floor-plans').remove([plan.image_path])
+    setSheetKey('builtin-1')
+    reloadPlans(); reload()
   }
 
   // Click on the plan → move the selected room's name there
@@ -474,23 +310,35 @@ function RoomsManager({ rooms, managed, reload }: { rooms: FloorRoom[]; managed:
     setLabels(p => { const n = { ...p }; delete n[r.id]; return n })
   }
 
+  // Room names scale with the drawing so they stay readable on large images
+  const labelScale = Math.max(1, vbW / 1000)
+
   return (
     <div className="card">
       <div className="card-header">
-        Floor plan rooms
-        <span style={{ fontWeight: 400, fontSize: 12, color: 'var(--text3)' }}>IC Building</span>
-        <div className="card-header-actions">
-          <div style={{ display: 'flex', gap: 2, padding: 3, background: 'var(--surface3)', borderRadius: 8 }}>
-            {([1, 2] as const).map(f => (
-              <button suppressHydrationWarning key={f} onClick={() => { setFloor(f); setPlacing(null) }} style={{
-                padding: '4px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: 'none',
-                background: floor === f ? 'var(--surface)' : 'transparent', color: floor === f ? 'var(--accent2)' : 'var(--text2)',
-              }}>{f === 1 ? '1st' : '2nd'} Floor</button>
+        Floor plans
+        <span style={{ fontWeight: 400, fontSize: 12, color: 'var(--text3)' }}>{sheet.building} · {floorLabel(sheet.floor)}</span>
+        <div className="card-header-actions" style={{ flexWrap: 'wrap' }}>
+          <select suppressHydrationWarning className="form-select" style={{ width: 'auto' }} value={sheet.key}
+            onChange={e => { setSheetKey(e.target.value); setPlacing(null) }}>
+            {[...new Set(sheets.map(s => s.building))].map(b => (
+              <optgroup key={b} label={b}>
+                {sheets.filter(s => s.building === b).map(s => <option key={s.key} value={s.key}>{b} — {floorLabel(s.floor)}</option>)}
+              </optgroup>
             ))}
-          </div>
-          <button suppressHydrationWarning className="btn btn-sm btn-primary" disabled={!managed} onClick={addRoom}>+ Add room</button>
+          </select>
+          <button suppressHydrationWarning className="btn btn-sm btn-primary" disabled={!plansManaged}
+            title={!plansManaged ? 'Run supabase/migration_floor_plans.sql in Supabase first' : undefined}
+            onClick={() => setAdding(true)}>+ Add floor plan</button>
+          <button suppressHydrationWarning className="btn btn-sm" disabled={!managed} onClick={addRoom}>+ Add room</button>
+          {sheet.planId && <button suppressHydrationWarning className="btn btn-sm" style={{ color: 'var(--crit)' }} onClick={removePlan}>Delete plan</button>}
         </div>
       </div>
+      {!plansManaged && (
+        <div style={{ padding: '8px 14px', fontSize: 12, color: 'var(--warn)', borderBottom: '1px solid var(--border)' }}>
+          To add floor plans for other buildings, run <span className="mono">supabase/migration_floor_plans.sql</span> in Supabase.
+        </div>
+      )}
 
       <div style={{ display: 'flex', flexWrap: 'wrap' }}>
         {/* Plan */}
@@ -502,11 +350,11 @@ function RoomsManager({ rooms, managed, reload }: { rooms: FloorRoom[]; managed:
             {placing && <button suppressHydrationWarning className="btn btn-sm" style={{ marginLeft: 8 }} onClick={() => setPlacing(null)}>Cancel</button>}
           </div>
           <div style={{ position: 'relative', borderRadius: 10, overflow: 'hidden', border: '1px solid var(--border)', background: '#fff', aspectRatio: `${vbW} / ${vbH}` }}>
-            <div dangerouslySetInnerHTML={{ __html: plan.replace(/<svg /, '<svg style="width:100%;height:100%;display:block" ') }} style={{ lineHeight: 0, width: '100%', height: '100%' }}/>
+            <SheetBackground sheet={sheet}/>
             <svg ref={svgRef} viewBox={`0 0 ${vbW} ${vbH}`} onClick={onPlanClick}
               style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', cursor: placing ? 'crosshair' : 'default' }}>
               {floorRooms.map(r => (
-                <g key={r.id}>
+                <g key={r.id} transform={labelScale > 1 ? `translate(${r.x},${r.y}) scale(${labelScale}) translate(${-r.x},${-r.y})` : undefined}>
                   {placing === r.id && <circle cx={r.x} cy={r.y} r="26" fill="rgba(22,163,74,.15)" stroke="var(--accent)" strokeDasharray="4 3"/>}
                   <RoomLabel room={{ ...r, label: labels[r.id] ?? r.label }} color={placing === r.id ? '#15803d' : '#111'}/>
                 </g>
@@ -538,10 +386,109 @@ function RoomsManager({ rooms, managed, reload }: { rooms: FloorRoom[]; managed:
               </div>
             </div>
           ))}
-          {!floorRooms.length && <div style={{ padding: 16, fontSize: 12, color: 'var(--text3)' }}>No rooms on this floor yet.</div>}
+          {!floorRooms.length && <div style={{ padding: 16, fontSize: 12, color: 'var(--text3)' }}>No rooms on this floor yet — press “+ Add room”.</div>}
           <div style={{ padding: '10px 14px', fontSize: 11.5, color: 'var(--text3)' }}>
-            Assign devices to rooms in the <strong>Devices</strong> section. Changes appear on the Floor Plan right away.
+            Assign devices to rooms in the <strong>Devices</strong> section: set a device&apos;s Building to <strong>{sheet.builtin ? 'IC Building / Building A' : sheet.building}</strong>, then pick its room. Changes appear on the Floor Plan right away.
           </div>
+        </div>
+      </div>
+
+      {adding && <AddPlanModal plans={plans} onClose={() => setAdding(false)}
+        onSaved={key => { setAdding(false); reloadPlans(); setSheetKey(key) }}/>}
+    </div>
+  )
+}
+
+// Upload a floor drawing for a building and floor
+function AddPlanModal({ plans, onClose, onSaved }: { plans: FloorPlan[]; onClose: () => void; onSaved: (sheetKey: string) => void }) {
+  const [building, setBuilding] = useState('')
+  const [floor, setFloor] = useState(1)
+  const [file, setFile] = useState<File | null>(null)
+  const [preview, setPreview] = useState<{ url: string; w: number; h: number } | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [known, setKnown] = useState<string[]>([])
+
+  useEffect(() => {
+    supabase.from('devices').select('location').then(({ data }) => {
+      const locs = (data ?? []).map((d: { location: string }) => d.location).filter(l => l && l !== 'Unassigned')
+      setKnown([...new Set([...locs, ...BUILDINGS, ...plans.map(p => p.building)])].sort())
+    })
+  }, [plans])
+  useEffect(() => () => { if (preview) URL.revokeObjectURL(preview.url) }, [preview])
+
+  function pick(f: File | null) {
+    setErr(null); setFile(null); setPreview(null)
+    if (!f) return
+    if (!/^image\/(png|jpeg|webp)$/.test(f.type)) { setErr('Use a PNG, JPG or WebP image of the floor plan.'); return }
+    if (f.size > 10 * 1024 * 1024) { setErr('The image is larger than 10 MB.'); return }
+    const url = URL.createObjectURL(f)
+    const img = new window.Image()
+    img.onload = () => { setFile(f); setPreview({ url, w: img.naturalWidth, h: img.naturalHeight }) }
+    img.onerror = () => { URL.revokeObjectURL(url); setErr('That file could not be read as an image.') }
+    img.src = url
+  }
+
+  const name = building.trim()
+  const exists = plans.some(p => p.building.trim().toLowerCase() === name.toLowerCase() && p.floor === floor)
+
+  async function save() {
+    if (!name) { setErr('Enter the building name.'); return }
+    if (!file || !preview) { setErr('Choose the floor plan image.'); return }
+    if (exists) { setErr(`${name} already has a ${floorLabel(floor)} plan — delete it first to replace it.`); return }
+    setSaving(true); setErr(null)
+    const ext = file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : 'jpg'
+    const path = `${crypto.randomUUID()}.${ext}`
+    const up = await supabase.storage.from('floor-plans').upload(path, file, { contentType: file.type, upsert: false })
+    if (up.error) { setSaving(false); setErr(`Upload failed: ${up.error.message}`); return }
+    const { data, error } = await supabase.from('floor_plans')
+      .insert({ building: name, floor, image_path: path, width: preview.w, height: preview.h }).select('id').single()
+    if (error) {
+      await supabase.storage.from('floor-plans').remove([path])
+      setSaving(false); setErr(error.message); return
+    }
+    setSaving(false)
+    onSaved(data.id)
+  }
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.45)', zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+      <div className="card" onClick={e => e.stopPropagation()} style={{ width: 520, maxWidth: '100%', maxHeight: '90vh', overflow: 'auto' }}>
+        <div className="card-header">Add floor plan</div>
+        <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div className="form-group">
+            <label className="form-label">Building</label>
+            <input suppressHydrationWarning className="form-input" list="fp-buildings" placeholder="e.g. Library, Admin Building"
+              value={building} onChange={e => setBuilding(e.target.value)}/>
+            <datalist id="fp-buildings">{known.map(b => <option key={b} value={b}/>)}</datalist>
+            <div style={{ fontSize: 11.5, color: 'var(--text3)', marginTop: 4 }}>Devices whose Building (location) has this exact name appear on this plan.</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Floor</label>
+            <select suppressHydrationWarning className="form-select" value={floor} onChange={e => setFloor(Number(e.target.value))}>
+              {Array.from({ length: 10 }, (_, i) => i + 1).map(n => <option key={n} value={n}>{floorLabel(n)}</option>)}
+            </select>
+            {exists && <div style={{ fontSize: 11.5, color: 'var(--crit)', marginTop: 4 }}>This building already has a {floorLabel(floor)} plan.</div>}
+          </div>
+          <div className="form-group">
+            <label className="form-label">Floor plan image (PNG, JPG or WebP, up to 10 MB)</label>
+            <input suppressHydrationWarning type="file" accept="image/png,image/jpeg,image/webp" onChange={e => pick(e.target.files?.[0] ?? null)}/>
+          </div>
+          {preview && (
+            <div>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={preview.url} alt="Floor plan preview" style={{ width: '100%', border: '1px solid var(--border)', borderRadius: 8, display: 'block' }}/>
+              <div style={{ fontSize: 11.5, color: 'var(--text3)', marginTop: 4 }}>{preview.w} × {preview.h} px</div>
+            </div>
+          )}
+          {err && <div style={{ fontSize: 12.5, color: 'var(--crit)' }}>{err}</div>}
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button suppressHydrationWarning className="btn" onClick={onClose} disabled={saving}>Cancel</button>
+            <button suppressHydrationWarning className="btn btn-primary" onClick={save} disabled={saving || !file || !name}>
+              {saving ? 'Uploading…' : 'Add floor plan'}
+            </button>
+          </div>
+          <div style={{ fontSize: 11.5, color: 'var(--text3)' }}>After adding, press “+ Add room” and place each room name on the drawing.</div>
         </div>
       </div>
     </div>

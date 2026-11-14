@@ -7,7 +7,10 @@ import type { Device, ScanResult } from '@/lib/database.types'
 import { supabase } from '@/lib/supabase'
 import TopologyCanvas from './TopologyCanvas'
 import TopologyLinks from './TopologyLinks'
-import { useFloorRooms, roomOfDevice, stripRoomLabels, FLOOR_VIEWBOX, type FloorRoom } from '@/lib/floor-rooms'
+import {
+  useFloorRooms, useFloorPlans, roomOfDevice, stripRoomLabels, roomsOfSheet, sheetsForLocation, floorLabel,
+  type FloorRoom, type FloorSheet,
+} from '@/lib/floor-rooms'
 
 type ViewMode = 'buildings' | 'tree' | 'links' | 'floormap' | 'realtime'
 
@@ -87,7 +90,7 @@ export function RoomLabel({ room, color = '#111' }: { room: FloorRoom; color?: s
   )
 }
 
-function FloorOverlay({ rooms, byRoom, vbW, vbH, focus, showDevices, onHover }: {
+function FloorOverlay({ rooms: rawRooms, byRoom, vbW: rawW, vbH: rawH, focus, showDevices, onHover }: {
   rooms: FloorRoom[]
   byRoom: Record<string, Device[]>
   vbW: number; vbH: number
@@ -95,6 +98,11 @@ function FloorOverlay({ rooms, byRoom, vbW, vbH, focus, showDevices, onHover }: 
   showDevices: boolean
   onHover: (room: FloorRoom | null, e?: React.MouseEvent) => void
 }) {
+  // Large uploaded drawings (e.g. 3000 px wide): draw names and markers at
+  // the same size as on a ~1000-unit plan instead of tiny
+  const s = Math.max(1, rawW / 1000)
+  const vbW = rawW / s, vbH = rawH / s
+  const rooms = s === 1 ? rawRooms : rawRooms.map(r => ({ ...r, x: r.x / s, y: r.y / s }))
   return (
     <svg viewBox={`0 0 ${vbW} ${vbH}`} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}>
       <style>{`
@@ -271,13 +279,28 @@ export const FLOOR_2_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0
   <text x="510" y="508" font-family="Arial,Helvetica,sans-serif" font-size="12" text-anchor="middle" fill="#555">IC BUILDING — DNSC</text>
 </svg>`
 
-// ─── IC Floor Plan panel ──────────────────────────────────────────────────────
+// The drawing of one floor: a built-in IC Building plan or an uploaded image,
+// stretched to its box (the box keeps the drawing's proportions)
+export function SheetBackground({ sheet }: { sheet: FloorSheet }) {
+  const svg = useMemo(() => sheet.builtin ? stripRoomLabels(sheet.builtin === 1 ? FLOOR_1_SVG : FLOOR_2_SVG) : null, [sheet.builtin])
+  if (svg) return (
+    <div dangerouslySetInnerHTML={{ __html: svg.replace(/<svg /, '<svg style="width:100%;height:100%;display:block" preserveAspectRatio="xMidYMid meet" ') }}
+      style={{ lineHeight: 0, width: '100%', height: '100%' }}/>
+  )
+  // eslint-disable-next-line @next/next/no-img-element
+  return <img src={sheet.imageUrl ?? ''} alt={`${sheet.building} ${floorLabel(sheet.floor)}`} draggable={false}
+    style={{ width: '100%', height: '100%', display: 'block', objectFit: 'fill', userSelect: 'none' }}/>
+}
 
-function ICFloorPlan({ devices, onBack, live = false, onLiveChange }: {
+// ─── Building Floor Plan panel ────────────────────────────────────────────────
+
+function BuildingFloorPlan({ building, location, sheets, devices, onBack, live = false, onLiveChange }: {
+  building: string; location: string; sheets: FloorSheet[]
   devices: Device[]; onBack: () => void; live?: boolean
   onLiveChange?: (on: boolean) => void   // keeps the View dropdown in step with the Live toggle
 }) {
-  const [floor, setFloor] = useState<'1' | '2'>('1')
+  const [floorKey, setFloor] = useState<string>(sheets[0]?.key ?? '')
+  const sheet = sheets.find(s => s.key === floorKey) ?? sheets[0]
   const [liveDevices, setLiveDevices] = useState<Device[]>(devices)
   const [showLive, setShowLive] = useState(live)
   const [focus, setFocus] = useState<string | null>(null)                 // room id highlighted from the side panel
@@ -308,25 +331,24 @@ function ICFloorPlan({ devices, onBack, live = false, onLiveChange }: {
   // Real-time device changes (the page also refreshes every few seconds)
   useEffect(() => {
     if (!showLive) return
-    const location = devices[0]?.location ?? ''
     const ch = supabase
-      .channel('floor-plan-rt')
+      .channel(`floor-plan-rt-${location}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, async () => {
-        const q = supabase.from('devices').select('*').order('name')
-        const { data } = location ? await q.eq('location', location) : await q
+        const { data } = await supabase.from('devices').select('*').eq('location', location).order('name')
         if (data) setLiveDevices(data as Device[])
       })
       .subscribe()
     return () => { supabase.removeChannel(ch) }
-  }, [devices, showLive])
+  }, [location, showLive])
 
-  const svgContent = useMemo(() => stripRoomLabels(floor === '1' ? FLOOR_1_SVG : FLOOR_2_SVG), [floor])
-  const rooms      = useMemo(() => allRooms.filter(r => String(r.floor) === floor), [allRooms, floor])
-  const [vbW, vbH] = FLOOR_VIEWBOX[floor === '1' ? 1 : 2]
+  const rooms     = useMemo(() => sheet ? roomsOfSheet(allRooms, sheet) : [], [allRooms, sheet])
+  // Every room of this building (all floors) — for "not in a room"
+  const bldgRooms = useMemo(() => sheets.flatMap(s => roomsOfSheet(allRooms, s)), [allRooms, sheets])
+  const vbW = sheet?.vbW ?? 1000, vbH = sheet?.vbH ?? 600
 
   const byRoom = useMemo(() => devicesByRoom(rooms, liveDevices), [rooms, liveDevices])
-  // Devices in no room on either floor — listed, not guessed onto the map
-  const unplaced = useMemo(() => liveDevices.filter(d => !roomOfDevice(d, allRooms)), [liveDevices, allRooms])
+  // Devices in no room on any floor — listed, not guessed onto the map
+  const unplaced = useMemo(() => liveDevices.filter(d => !roomOfDevice(d, bldgRooms)), [liveDevices, bldgRooms])
   const onFloor = rooms.flatMap(r => byRoom[r.id] ?? [])
 
   const count = (list: Device[], s: string) => list.filter(d => d.status === s).length
@@ -348,13 +370,13 @@ function ICFloorPlan({ devices, onBack, live = false, onLiveChange }: {
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 16px', borderBottom: '1px solid var(--border)', flexWrap: 'wrap' }}>
         <button suppressHydrationWarning className="btn btn-sm" onClick={onBack}>← Back</button>
         <div>
-          <div style={{ fontWeight: 700, fontSize: 15 }}>IC Building</div>
+          <div style={{ fontWeight: 700, fontSize: 15 }}>{building}</div>
           <div style={{ fontSize: 11.5, color: 'var(--text3)' }}>{onFloor.length} device{onFloor.length === 1 ? '' : 's'} placed on this floor</div>
         </div>
-        <div style={{ display: 'flex', gap: 2, padding: 3, background: 'var(--surface3)', borderRadius: 8, marginLeft: 8 }}>
-          {(['1', '2'] as const).map(f => (
-            <button suppressHydrationWarning key={f} style={tabBtn(floor === f)} onClick={() => { setFloor(f); setFocus(null) }}>
-              {f === '1' ? '1st' : '2nd'} Floor
+        <div style={{ display: 'flex', gap: 2, padding: 3, background: 'var(--surface3)', borderRadius: 8, marginLeft: 8, flexWrap: 'wrap' }}>
+          {sheets.map(s => (
+            <button suppressHydrationWarning key={s.key} style={tabBtn(sheet?.key === s.key)} onClick={() => { setFloor(s.key); setFocus(null) }}>
+              {floorLabel(s.floor)}
             </button>
           ))}
         </div>
@@ -385,13 +407,12 @@ function ICFloorPlan({ devices, onBack, live = false, onLiveChange }: {
             width: Math.min(area.w, area.h * (vbW / vbH)), height: Math.min(area.w, area.h * (vbW / vbH)) / (vbW / vbH),
           }}
             onMouseLeave={() => setTip(null)}>
-            <div dangerouslySetInnerHTML={{ __html: svgContent.replace(/<svg /, '<svg style="width:100%;height:100%;display:block" preserveAspectRatio="xMidYMid meet" ') }}
-              style={{ lineHeight: 0, width: '100%', height: '100%' }}/>
+            {sheet && <SheetBackground sheet={sheet}/>}
             {/* Room names always; device markers only when Live is on */}
             <FloorOverlay rooms={rooms} byRoom={byRoom} vbW={vbW} vbH={vbH} focus={focus} showDevices={showLive}
               onHover={(room, e) => setTip(room && e ? { room, x: e.clientX, y: e.clientY } : null)}/>
             <div style={{ position: 'absolute', left: 12, bottom: 10, fontSize: 11, fontWeight: 700, letterSpacing: '.08em', color: '#64748b', background: 'rgba(255,255,255,.85)', padding: '3px 9px', borderRadius: 6 }}>
-              {floor === '1' ? '1ST FLOOR' : '2ND FLOOR'}
+              {sheet ? floorLabel(sheet.floor).toUpperCase() : ''}
             </div>
           </div>
           </div>
@@ -735,12 +756,17 @@ export default function TopologyHub({ devs, clientCounts = {}, mode, initialBldg
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewMode])
 
+  const { plans } = useFloorPlans()
   const bldgGroups = useMemo<BldgGroup[]>(() => {
     const map = new Map<string, Device[]>()
     devs.forEach(d => {
       if (!map.has(d.location)) map.set(d.location, [])
       map.get(d.location)!.push(d)
     })
+    // Buildings that have a floor plan but no devices yet
+    for (const p of plans) {
+      if (![...map.keys()].some(k => k.trim().toLowerCase() === p.building.trim().toLowerCase())) map.set(p.building, [])
+    }
     const groups: BldgGroup[] = []
     map.forEach((devices, name) => {
       groups.push({
@@ -749,12 +775,12 @@ export default function TopologyHub({ devs, clientCounts = {}, mode, initialBldg
         online:       devices.filter(d => d.status === 'up').length,
         warn:         devices.filter(d => d.status === 'warn').length,
         devices,
-        hasFloorPlan: /ic.?build|building.?a/i.test(name),
+        hasFloorPlan: sheetsForLocation(name, plans).length > 0,
         imageUrl:     getBldgImage(name),
       })
     })
     return groups.sort((a, b) => b.total - a.total)
-  }, [devs])
+  }, [devs, plans])
 
   const deviceTypes = useMemo(() => [...new Set(devs.map(d => d.type))].sort(), [devs])
 
@@ -876,13 +902,17 @@ export default function TopologyHub({ devs, clientCounts = {}, mode, initialBldg
               The panel's Live toggle switches between the two views. */}
           {(viewMode === 'floormap' || viewMode === 'realtime') && (
             filteredGroups.some(g => g.hasFloorPlan) ? (
-              filteredGroups.filter(g => g.hasFloorPlan).map(g => (
-                <div key={g.name} style={{ marginBottom: 16 }}>
-                  <ICFloorPlan devices={g.devices} live={viewMode === 'realtime'}
-                    onLiveChange={on => setViewMode(on ? 'realtime' : 'floormap')}
-                    onBack={() => router.push('/topology')}/>
-                </div>
-              ))
+              filteredGroups.filter(g => g.hasFloorPlan).map(g => {
+                const sheets = sheetsForLocation(g.name, plans)
+                return (
+                  <div key={`${g.name}-${sheets.map(s => s.key).join()}`} style={{ marginBottom: 16 }}>
+                    <BuildingFloorPlan building={/ic.?build|building.?a/i.test(g.name) && !plans.some(p => p.building === g.name) ? 'IC Building' : g.name}
+                      location={g.name} sheets={sheets} devices={g.devices} live={viewMode === 'realtime'}
+                      onLiveChange={on => setViewMode(on ? 'realtime' : 'floormap')}
+                      onBack={() => router.push('/topology')}/>
+                  </div>
+                )
+              })
             ) : (
               <div style={{ padding: 40, textAlign: 'center', color: 'var(--text3)' }}>
                 <div style={{ fontSize: 32, marginBottom: 10 }}>🗺</div>

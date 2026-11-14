@@ -8,8 +8,8 @@ import { useAuth } from '@/components/AuthProvider'
 import ManageSection from '@/components/ManageSection'
 import { ROLE_LABEL, type Profile, type Role } from '@/lib/roles'
 
-type SettingsTab = 'notif' | 'roles' | 'manage' | 'maint' | 'disc' | 'integrations'
-const SETTINGS_TABS: SettingsTab[] = ['notif', 'roles', 'manage', 'maint', 'disc', 'integrations']
+type SettingsTab = 'notif' | 'roles' | 'manage' | 'maint'
+const SETTINGS_TABS: SettingsTab[] = ['notif', 'roles', 'manage', 'maint']
 
 import type { SmtpStatus, NotificationRecipient } from '@/lib/database.types'
 
@@ -85,22 +85,6 @@ function RecipientsPanel() {
         <button suppressHydrationWarning className="btn btn-sm btn-primary" onClick={add}>Add</button>
       </div>
       {err && <div style={{ fontSize: 12, color: 'var(--crit)', marginTop: 6 }}>{err}</div>}
-    </div>
-  )
-}
-
-function Toggle({ label, sub, defaultChecked }: { label: string; sub: string; defaultChecked?: boolean }) {
-  const [on, setOn] = useState(defaultChecked ?? false)
-  return (
-    <div className="toggle-wrap">
-      <label className="toggle">
-        <input suppressHydrationWarning type="checkbox" checked={on} onChange={e => setOn(e.target.checked)} />
-        <span className="toggle-slider" />
-      </label>
-      <div>
-        <div style={{ fontWeight: 500 }}>{label}</div>
-        <div style={{ fontSize: 12, color: 'var(--text3)' }}>{sub}</div>
-      </div>
     </div>
   )
 }
@@ -306,9 +290,9 @@ export default function SettingsPage() {
   return (
     <>
       <div className="tabs" id="settings-tabs">
-        {(['notif','roles','manage','maint','disc','integrations'] as SettingsTab[]).map(t => (
+        {SETTINGS_TABS.map(t => (
           <div key={t} className={`tab${tab === t ? ' active' : ''}`} onClick={() => setTab(t)}>
-            {{ notif:'Notifications', roles:'Roles & Access', manage:'Manage', maint:'Maintenance', disc:'Discovery', integrations:'Integrations' }[t]}
+            {{ notif:'Notifications', roles:'Roles & Access', manage:'Manage', maint:'Maintenance' }[t]}
           </div>
         ))}
       </div>
@@ -370,11 +354,8 @@ SMTP_PASS=your-app-password`}
                 {emailMsg && <span style={{ fontSize: 12, alignSelf: 'center', color: emailMsg.startsWith('✓') ? 'var(--ok)' : 'var(--crit)' }}>{emailMsg}</span>}
               </div>
               <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 14 }}>
-                The monitoring agent emails each new critical alert (and warnings, for recipients who chose them) within about 20 seconds, an incident report when an emailed incident is resolved, and the daily report each morning — no dashboard needs to be open. Each alert is emailed once.
+                The monitoring agent emails a device that has been offline / not responding for 45 minutes (one that comes back sooner is not emailed), other critical alerts such as CPU or memory within about 20 seconds (and warnings, for recipients who chose them), an incident report when an emailed incident is resolved, and the daily report each morning — no dashboard needs to be open. Each alert is emailed once.
               </div>
-              <Toggle label="Browser Push Notifications" sub="Alert shown in OS notification center" defaultChecked />
-              <Toggle label="Telegram"        sub="@nw_alerts_bot → #securenet-alerts (configure via webhook)" />
-              <Toggle label="Slack"           sub="#network-ops workspace (configure via webhook)" />
             </div>
           </div>
           <div className="card">
@@ -428,63 +409,6 @@ SMTP_PASS=your-app-password`}
                 <tr><td>Bldg B UPS Replacement</td><td>SW-B2, AP-B-01</td><td>2026-11-06 08:00</td><td>2026-11-06 12:00</td><td>Once</td><td><span className="chip chip-warn">Upcoming</span></td><td><button suppressHydrationWarning className="btn btn-sm">Edit</button></td></tr>
               </tbody>
             </table>
-          </div>
-        </div>
-      )}
-
-      {/* ── Discovery ── */}
-      {tab === 'disc' && (
-        <div className="grid-2">
-          <div className="card">
-            <div className="card-header">Network Discovery</div>
-            <div className="card-body">
-              <div className="form-group"><label className="form-label">Subnet Range</label><input suppressHydrationWarning className="form-input" defaultValue="192.168.0.0/16" /></div>
-              <div className="form-group"><label className="form-label">SNMP Community</label><input suppressHydrationWarning className="form-input" defaultValue="nw2026" type="password" /></div>
-              <div className="form-group"><label className="form-label">Polling Interval</label>
-                <select suppressHydrationWarning className="form-select"><option>1 second</option><option selected>30 seconds</option><option>1 minute</option><option>5 minutes</option></select>
-              </div>
-              <button suppressHydrationWarning className="btn btn-primary" onClick={() => alert('Discovery started on 192.168.0.0/16…')}>Start Discovery</button>
-            </div>
-          </div>
-          <div className="card">
-            <div className="card-header">Rogue Device Alerts</div>
-            <div className="card-body">
-              <Toggle label="Alert on unknown MACs" sub="Notify when unrecognized device joins" defaultChecked />
-              <Toggle label="Auto-quarantine rogues" sub="Block unknown MACs automatically" defaultChecked />
-              <div style={{ background: 'rgba(210,153,34,.08)', border: '1px solid rgba(210,153,34,.2)', borderRadius: 'var(--r)', padding: 10, fontSize: 13 }}>
-                <strong style={{ color: 'var(--warn)' }}>1 unknown MAC detected</strong><br />
-                <span style={{ color: 'var(--text2)' }}>E4:5F:01:9D:72:AB — Building B</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Integrations ── */}
-      {tab === 'integrations' && (
-        <div className="grid-3">
-          {[
-            { icon: '🎫', label: 'Ticketing Webhook', sub: 'Auto-create tickets on critical alerts', placeholder: 'https://your-psa.example/api/tickets' },
-            { icon: '☸',  label: 'Kubernetes',        sub: 'Monitor cluster nodes and services',    placeholder: 'kubeconfig or API server URL' },
-          ].map(item => (
-            <div className="card" key={item.label}>
-              <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <div style={{ fontSize: 20 }}>{item.icon}</div>
-                <div style={{ fontWeight: 600 }}>{item.label}</div>
-                <div style={{ fontSize: 12, color: 'var(--text3)' }}>{item.sub}</div>
-                <input suppressHydrationWarning className="form-input" placeholder={item.placeholder} />
-                <button suppressHydrationWarning className="btn btn-sm">Save</button>
-              </div>
-            </div>
-          ))}
-          <div className="card">
-            <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <div style={{ fontSize: 20 }}>📡</div>
-              <div style={{ fontWeight: 600 }}>JSON-RPC API</div>
-              <div style={{ fontSize: 12, color: 'var(--text3)' }}>External access via API tokens</div>
-              <code style={{ background: 'var(--surface2)', padding: '6px 8px', borderRadius: 'var(--r)', display: 'block', wordBreak: 'break-all', fontFamily: 'var(--mono)', fontSize: 11 }}>nw_tok_abc123def456</code>
-              <button suppressHydrationWarning className="btn btn-sm" onClick={() => alert('Token regenerated!')}>Regenerate</button>
-            </div>
           </div>
         </div>
       )}

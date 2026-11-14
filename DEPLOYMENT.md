@@ -94,6 +94,7 @@ Optional settings in `poller/.env` (or the project `.env`):
 | `SMTP_FROM` | `SMTP_USER` | Sender address |
 | `SMTP_TO` | — | Fallback recipients (comma-separated) when none are set in Settings → Email Notifications |
 | `REPORT_HOUR` | `7` | Hour of the day (local) from which the daily report is made and emailed |
+| `OFFLINE_EMAIL_DELAY_MIN` | `45` | Minutes a device must stay offline / not responding before it is emailed (`0` = at once). The dashboard alert still appears immediately. |
 
 ---
 

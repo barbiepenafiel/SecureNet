@@ -331,16 +331,17 @@ export default function AlertsPage() {
         <div className="card-header">Escalation Policy</div>
         <div className="card-body">
           <table className="tbl">
-            <thead><tr><th>Level</th><th>Wait</th><th>Notify</th><th>Channel</th></tr></thead>
+            <thead><tr><th>Step</th><th>When</th><th>Who</th><th>Channel</th></tr></thead>
             <tbody>
               <tr><td>Detect</td><td>every 15 s</td><td colSpan={2}>ICMP ping → ARP → SNMP. A device is marked offline after 3 failed checks in a row.</td></tr>
-              <tr><td>L1</td><td>0 min</td><td>On-call tech</td><td>Email + Telegram</td></tr>
-              <tr><td>L2</td><td>15 min (no ack)</td><td>Network Admin</td><td>SMS + Slack</td></tr>
-              <tr><td>L3</td><td>30 min (no ack)</td><td>IT Manager</td><td>Phone call</td></tr>
+              <tr><td>Alert</td><td>immediately</td><td>Everyone signed in</td><td>Dashboard alert + browser notification</td></tr>
+              <tr><td>Email</td><td>after 45 min still offline</td><td>Email recipients (Settings)</td><td>Email — a device that comes back sooner is not emailed</td></tr>
+              <tr><td>Email</td><td>within ~20 s</td><td>Email recipients (Settings)</td><td>Email — CPU / memory critical; warnings only to recipients who chose them</td></tr>
+              <tr><td>Resolved</td><td>when it recovers</td><td>Email recipients (Settings)</td><td>Email incident report with the downtime</td></tr>
             </tbody>
           </table>
           <div style={{ marginTop: 10, fontSize: 12, color: 'var(--text3)' }}>
-            Note: Escalation is triggered only after grace period expires, avoiding notifications for temporary flaps.
+            The grace period in Settings delays the alert itself; the 45-minute email wait is set on the agent (OFFLINE_EMAIL_DELAY_MIN).
             Configure thresholds in <a href="/settings" style={{ color: 'var(--info)' }}>Settings → Notifications</a>.
           </div>
         </div>

@@ -49,32 +49,24 @@ function UptimeBadge({ pct }: { pct: number | null }) {
   )
 }
 
-function KpiTile({ label, value, sub, iconBg, icon }: {
-  label: string; value: string | number; sub: string; iconBg: string; icon: string
-}) {
+// Summary number, same card style as the dashboard
+function KpiTile({ label, value, sub, accent }: { label: string; value: string | number; sub: string; accent: string }) {
   return (
-    <div style={{
-      background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 10,
-      padding: '16px 18px', display: 'flex', alignItems: 'center', gap: 14,
-    }}>
-      <div style={{ width: 40, height: 40, borderRadius: 10, background: iconBg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0 }}>
-        {icon}
-      </div>
-      <div>
-        <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>{label}</div>
-        <div style={{ fontSize: 24, fontWeight: 700, lineHeight: 1 }}>{value}</div>
-        <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 4 }}>{sub}</div>
-      </div>
+    <div className="kpi" style={{ borderTop: `3px solid ${accent}` }}>
+      <div className="kpi-label">{label}</div>
+      <div className="kpi-value" style={{ fontSize: 28 }}>{typeof value === 'number' ? value.toLocaleString() : value}</div>
+      <div className="kpi-sub">{sub}</div>
     </div>
   )
 }
 
+// Smaller figure inside the Trends card
 function TrendKpi({ label, value, sub, accent }: { label: string; value: string; sub: string; accent: string }) {
   return (
-    <div style={{ flex: 1, minWidth: 120 }}>
-      <div style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,.6)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{label}</div>
-      <div style={{ fontSize: 22, fontWeight: 700, color: accent, lineHeight: 1 }}>{value}</div>
-      <div style={{ fontSize: 11, color: 'rgba(255,255,255,.5)', marginTop: 4 }}>{sub}</div>
+    <div style={{ minWidth: 0, borderLeft: `3px solid ${accent}`, paddingLeft: 12 }}>
+      <div className="kpi-label">{label}</div>
+      <div style={{ fontSize: 20, fontWeight: 700, lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value}</div>
+      <div className="kpi-sub" style={{ marginTop: 4 }}>{sub}</div>
     </div>
   )
 }
@@ -374,52 +366,32 @@ export default function ReportsPage() {
 
   return (
     <>
-      {/* ── Header banner ── */}
-      <div style={{
-        background: 'linear-gradient(135deg, #064e3b 0%, #065f46 40%, #047857 100%)',
-        borderRadius: 12, padding: '24px 28px', marginBottom: 20,
-        display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'flex-start',
-      }}>
-        <div style={{ flex: 1, minWidth: 260 }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,.55)', letterSpacing: '.1em', textTransform: 'uppercase', marginBottom: 6 }}>
-            Analytics &amp; Reports
-          </div>
-          <div style={{ fontSize: 24, fontWeight: 700, color: '#fff', marginBottom: 6 }}>Network Analytics</div>
-          <div style={{ fontSize: 13, color: 'rgba(255,255,255,.65)', maxWidth: 420 }}>
-            Historical trends, performance summaries, and infrastructure utilization across the campus network.
-          </div>
-          <div style={{ display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
-            {['Live Monitoring','Alert Tracking','Device Health'].map(f => (
-              <span key={f} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 10px', borderRadius: 20, border: '1px solid rgba(255,255,255,.25)', fontSize: 11, color: 'rgba(255,255,255,.8)', background: 'rgba(255,255,255,.08)', cursor: 'default' }}>
-                <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#4ade80', display: 'inline-block' }} />
-                {f}
-              </span>
-            ))}
-          </div>
+      {/* ── Header: title + period ── */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+        <div style={{ flex: 1, minWidth: 220 }}>
+          <div style={{ fontSize: 20, fontWeight: 700 }}>Network Analytics</div>
+          <div style={{ fontSize: 13, color: 'var(--text3)', marginTop: 2 }}>Uptime, latency and alerts measured by the monitoring agent</div>
         </div>
-        <div>
-          <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,.5)', letterSpacing: '.08em', textTransform: 'uppercase', marginBottom: 8, textAlign: 'right' }}>View Period</div>
-          <div style={{ display: 'flex', gap: 4 }}>
-            {(['24h','7d','30d'] as Period[]).map(p => (
-              <button suppressHydrationWarning key={p} onClick={() => setPeriod(p)} style={{
-                padding: '6px 14px', borderRadius: 8, border: '1px solid rgba(255,255,255,.2)',
-                background: period===p ? 'rgba(255,255,255,.2)' : 'rgba(255,255,255,.06)',
-                color: period===p ? '#fff' : 'rgba(255,255,255,.65)',
-                fontWeight: period===p ? 600 : 400, fontSize: 12, cursor: 'pointer',
-              }}>
-                {p==='24h'?'24 Hours':p==='7d'?'7 Days':'30 Days'}
-              </button>
-            ))}
-          </div>
+        <div style={{ display: 'flex', gap: 2, padding: 3, background: 'var(--surface3)', borderRadius: 8 }}>
+          {(['24h', '7d', '30d'] as Period[]).map(p => (
+            <button suppressHydrationWarning key={p} onClick={() => setPeriod(p)} style={{
+              padding: '6px 14px', borderRadius: 6, border: 'none', fontSize: 12.5, cursor: 'pointer',
+              fontWeight: 600, background: period === p ? 'var(--surface)' : 'transparent',
+              color: period === p ? 'var(--accent2)' : 'var(--text2)',
+              boxShadow: period === p ? '0 1px 3px rgba(15,23,42,.12)' : 'none',
+            }}>
+              {p === '24h' ? '24 hours' : p === '7d' ? '7 days' : '30 days'}
+            </button>
+          ))}
         </div>
       </div>
 
-      {/* ── 4 KPI tiles ── */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12, marginBottom: 20 }}>
-        <KpiTile label="Devices Monitored" value={devicesMonitored} sub={`${devicesMonitored - discoveredCount} added · ${discoveredCount} discovered`} iconBg="rgba(47,129,247,.18)" icon="🖥" />
-        <KpiTile label="Avg Uptime"        value={avgUptime === '—' ? '—' : `${avgUptime}%`}  sub={`${measuredDevs.length} device(s) · ${measuredNote}`} iconBg="rgba(34,197,94,.18)"  icon="📶" />
-        <KpiTile label="Avg Latency"       value={avgLatency === '—' ? '—' : `${avgLatency} ms`} sub="Mean ICMP response time" iconBg="rgba(210,153,34,.18)" icon="⚡" />
-        <KpiTile label="Total Alerts"      value={totalAlerts}      sub={`${critCount} critical · ${warnCount} warning`}  iconBg="rgba(248,81,73,.18)"  icon="🔔" />
+      {/* ── Summary ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 14, marginBottom: 20 }}>
+        <KpiTile label="Devices"     accent="var(--info)" value={devicesMonitored} sub={`${devicesMonitored - discoveredCount} added · ${discoveredCount} discovered`} />
+        <KpiTile label="Avg uptime"  accent="var(--ok)"   value={avgUptime === '—' ? '—' : `${avgUptime}%`} sub={`${measuredDevs.length} devices measured`} />
+        <KpiTile label="Avg latency" accent="var(--warn)" value={avgLatency === '—' ? '—' : `${avgLatency} ms`} sub="Ping response time" />
+        <KpiTile label="Alerts"      accent="var(--crit)" value={totalAlerts} sub={`${critCount.toLocaleString()} critical · ${warnCount.toLocaleString()} warning`} />
       </div>
 
       {/* ── Filters ── */}
@@ -469,19 +441,17 @@ export default function ReportsPage() {
         </div>
       </div>
 
-      {/* ── Trend Analytics banner ── */}
-      <div style={{
-        background: 'linear-gradient(135deg, #1e3a2f, #1a4a35)',
-        border: '1px solid rgba(34,197,94,.2)', borderRadius: 10,
-        padding: '20px 24px', marginBottom: 20,
-      }}>
-        <div style={{ fontSize: 15, fontWeight: 700, color: '#fff', marginBottom: 4 }}>Trend Analytics</div>
-        <div style={{ fontSize: 12, color: 'rgba(255,255,255,.5)', marginBottom: 20 }}>Historical incident patterns, peak failure windows, and proactive maintenance insights.</div>
-        <div style={{ display: 'flex', gap: 32, flexWrap: 'wrap' }}>
-          <TrendKpi label="Avg Resolution"   value={avgResolution}             sub="Mean time to resolve incidents" accent="#fff" />
-          <TrendKpi label="Resolution Rate"  value={resolutionRate}            sub={`${resolvedAlerts.length} of ${problems.length} problems resolved`} accent="#4ade80" />
-          <TrendKpi label="Most Problematic" value={mostProblematic.name}      sub={mostProblematic.count ? `${mostProblematic.count} alerts in period` : 'No alerts in period'} accent="#fbbf24" />
-          <TrendKpi label="Peak Failure Hour" value={peakHourLabel}            sub="Most incidents occur at"       accent="#f87171" />
+      {/* ── Trends ── */}
+      <div className="card" style={{ marginBottom: 20 }}>
+        <div className="card-header">
+          Trends
+          <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)', fontWeight: 400 }}>Critical and warning alerts in this period</span>
+        </div>
+        <div className="card-body" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 20 }}>
+          <TrendKpi label="Avg resolution"    accent="var(--info)" value={avgResolution}        sub="Time to resolve a problem" />
+          <TrendKpi label="Resolution rate"   accent="var(--ok)"   value={resolutionRate}       sub={`${resolvedAlerts.length.toLocaleString()} of ${problems.length.toLocaleString()} resolved`} />
+          <TrendKpi label="Most problematic"  accent="var(--warn)" value={mostProblematic.name} sub={mostProblematic.count ? `${mostProblematic.count.toLocaleString()} alerts` : 'No alerts'} />
+          <TrendKpi label="Peak failure hour" accent="var(--crit)" value={peakHourLabel}        sub="Most problems start" />
         </div>
       </div>
 
@@ -541,55 +511,6 @@ export default function ReportsPage() {
             ? <UptimeDowntimeChart key={`${period}-${uptimeLabels.join()}`} labels={uptimeLabels} uptime={uptimeUp} downtime={uptimeDown} />
             : <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>{av ? 'No measurements in this period' : 'Loading measurements…'}</div>}
         </div>
-      </div>
-
-      {/* ── Critical incidents (urgent network issues) ── */}
-      <div className="card" style={{ marginBottom: 20 }}>
-        <div className="card-header">
-          Critical Incidents
-          <span style={{ fontSize: 11, color: 'var(--text3)', fontWeight: 400 }}>
-            {incidents.length} in this period · {openIncidents} still open · from the agent&apos;s alerts
-          </span>
-          <div className="card-header-actions">
-            <button suppressHydrationWarning className="btn btn-sm" disabled={!incidents.length} onClick={() => downloadCSV(
-              `incidents-${period}-${new Date().toISOString().slice(0, 10)}.csv`,
-              ['Incident', 'Device', 'IP', 'Location', 'Started', 'Resolved', 'Duration (min)', 'Detected by', 'Cause'],
-              incidents.map(i => [i.title, i.device, i.ip, i.location, new Date(i.startedAt).toLocaleString(), i.resolvedAt ? new Date(i.resolvedAt).toLocaleString() : 'open',
-                Math.round(i.durationMs / 60_000), i.method, i.rootCause]))}>↓ Export CSV</button>
-          </div>
-        </div>
-        <div style={{ overflowX: 'auto' }}>
-          <table className="tbl">
-            <thead><tr><th>Incident</th><th>Location</th><th>Started</th><th>Duration</th><th>Detected by</th><th>Cause</th></tr></thead>
-            <tbody>
-              {visibleInc.map(i => (
-                <tr key={i.id}>
-                  <td>
-                    <div style={{ fontWeight: 500 }}>{i.title}</div>
-                    <div className="mono" style={{ fontSize: 11, color: 'var(--text3)' }}>{i.ip ?? '—'}</div>
-                  </td>
-                  <td style={{ fontSize: 12, color: 'var(--text2)' }}>{i.location ?? '—'}</td>
-                  <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{new Date(i.startedAt).toLocaleString()}</td>
-                  <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
-                    {i.open ? <span className="chip chip-crit">Open · {fmtDur(i.durationMs)}</span> : fmtDur(i.durationMs)}
-                  </td>
-                  <td style={{ fontSize: 12, color: 'var(--text2)' }}>{i.method ?? '—'}</td>
-                  <td style={{ fontSize: 12, color: 'var(--text2)', maxWidth: 320 }}>{i.rootCause ?? '—'}</td>
-                </tr>
-              ))}
-              {!incidents.length && (
-                <tr><td colSpan={6} style={{ textAlign: 'center', padding: 24, color: 'var(--text3)' }}>{av ? 'No critical incidents in this period.' : 'Loading…'}</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-        {incidents.length > 10 && (
-          <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', textAlign: 'center' }}>
-            <button suppressHydrationWarning className="btn btn-sm" onClick={() => setShowAllInc(v => !v)}>
-              {showAllInc ? '↑ Show Less' : `↓ Show All Incidents (${incidents.length - 10} more)`}
-            </button>
-          </div>
-        )}
       </div>
 
       {/* ── SNMP Devices (hidden when there are no SNMP devices) ── */}
@@ -663,6 +584,55 @@ export default function ReportsPage() {
           </div>
         </>
       )}
+
+      {/* ── Critical incidents (urgent network issues) ── */}
+      <div className="card" style={{ marginBottom: 20 }}>
+        <div className="card-header">
+          Critical Incidents
+          <span style={{ fontSize: 11, color: 'var(--text3)', fontWeight: 400 }}>
+            {incidents.length} in this period · {openIncidents} still open · from the agent&apos;s alerts
+          </span>
+          <div className="card-header-actions">
+            <button suppressHydrationWarning className="btn btn-sm" disabled={!incidents.length} onClick={() => downloadCSV(
+              `incidents-${period}-${new Date().toISOString().slice(0, 10)}.csv`,
+              ['Incident', 'Device', 'IP', 'Location', 'Started', 'Resolved', 'Duration (min)', 'Detected by', 'Cause'],
+              incidents.map(i => [i.title, i.device, i.ip, i.location, new Date(i.startedAt).toLocaleString(), i.resolvedAt ? new Date(i.resolvedAt).toLocaleString() : 'open',
+                Math.round(i.durationMs / 60_000), i.method, i.rootCause]))}>↓ Export CSV</button>
+          </div>
+        </div>
+        <div style={{ overflowX: 'auto' }}>
+          <table className="tbl">
+            <thead><tr><th>Incident</th><th>Location</th><th>Started</th><th>Duration</th><th>Detected by</th><th>Cause</th></tr></thead>
+            <tbody>
+              {visibleInc.map(i => (
+                <tr key={i.id}>
+                  <td>
+                    <div style={{ fontWeight: 500 }}>{i.title}</div>
+                    <div className="mono" style={{ fontSize: 11, color: 'var(--text3)' }}>{i.ip ?? '—'}</div>
+                  </td>
+                  <td style={{ fontSize: 12, color: 'var(--text2)' }}>{i.location ?? '—'}</td>
+                  <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{new Date(i.startedAt).toLocaleString()}</td>
+                  <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+                    {i.open ? <span className="chip chip-crit">Open · {fmtDur(i.durationMs)}</span> : fmtDur(i.durationMs)}
+                  </td>
+                  <td style={{ fontSize: 12, color: 'var(--text2)' }}>{i.method ?? '—'}</td>
+                  <td style={{ fontSize: 12, color: 'var(--text2)', maxWidth: 320 }}>{i.rootCause ?? '—'}</td>
+                </tr>
+              ))}
+              {!incidents.length && (
+                <tr><td colSpan={6} style={{ textAlign: 'center', padding: 24, color: 'var(--text3)' }}>{av ? 'No critical incidents in this period.' : 'Loading…'}</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        {incidents.length > 10 && (
+          <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', textAlign: 'center' }}>
+            <button suppressHydrationWarning className="btn btn-sm" onClick={() => setShowAllInc(v => !v)}>
+              {showAllInc ? '↑ Show Less' : `↓ Show All Incidents (${incidents.length - 10} more)`}
+            </button>
+          </div>
+        )}
+      </div>
 
       {/* ── Device Performance Summary ── */}
       <div className="card">

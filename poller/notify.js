@@ -2,9 +2,12 @@
  * Email notifications and the daily report — run by the agent, so they work
  * with no dashboard open.
  *
- *  • New critical alerts (and warnings, for recipients who want them) are
- *    emailed within ~20 s. Each alert is claimed in the database
- *    (alerts.emailed_at) before sending, so it is never emailed twice.
+ *  • A device that is offline / not responding is emailed only after it has
+ *    stayed that way for OFFLINE_EMAIL_DELAY_MIN (default 45) minutes; if it
+ *    comes back sooner there is no email. Other critical alerts (CPU, memory)
+ *    and warnings (for recipients who want them) are emailed within ~20 s.
+ *    Each alert is claimed in the database (alerts.emailed_at) before
+ *    sending, so it is never emailed twice.
  *  • When an emailed critical incident is resolved, an incident report
  *    (what failed, when, for how long, how it was detected) is emailed.
  *  • Once a day (from REPORT_HOUR, local time) a report snapshot is saved to
@@ -15,6 +18,7 @@
  *   SMTP_TO       fallback recipients (comma-separated) when none are set in
  *                 Settings → Email Notifications
  *   REPORT_HOUR   hour of the day for the daily report (default 7)
+ *   OFFLINE_EMAIL_DELAY_MIN  minutes offline before an email (default 45, 0 = at once)
  * Recipients: notification_recipients (supabase/migration_objectives.sql).
  */
 
@@ -23,6 +27,8 @@ const core = require('./report-core')
 
 const LOOP_MS = 20_000
 const NEW_ALERT_WINDOW_MS = 30 * 60_000    // never email alerts older than this (e.g. after the migration)
+// A device must stay offline / not responding this long before it is emailed
+const OFFLINE_EMAIL_DELAY_MS = Math.max(0, parseInt(process.env.OFFLINE_EMAIL_DELAY_MIN ?? '45', 10) || 0) * 60_000
 const REPORT_HOUR = Math.min(23, Math.max(0, parseInt(process.env.REPORT_HOUR ?? '7', 10) || 0))
 
 let db = null
@@ -81,7 +87,9 @@ function alertsHtml(alerts) {
       <div style="font-size:11px;font-weight:700;color:${color}">${label}</div>
       <div style="font-size:15px;font-weight:700;margin:2px 0 8px">${esc(a.title)}</div>
       ${kv([['Device', a.device_name], ['IP address', a.device_ip], ['Location', a.location], ['Detected by', a.detection_method],
-        ['Time', new Date(a.created_at).toLocaleString()], ['Cause', a.root_cause], ['Details', a.device_name ? null : a.meta]])}
+        ['Time', new Date(a.created_at).toLocaleString()],
+        ['Offline for', a.status === 'offline' && !a.resolved_at ? `${core.fmtDuration(Date.now() - new Date(a.created_at).getTime())} and still not responding` : null],
+        ['Cause', a.root_cause], ['Details', a.device_name ? null : a.meta]])}
     </div>`
   }).join('')
   const crit = alerts.filter(a => a.severity === 'crit').length
@@ -119,7 +127,7 @@ function reportHtml(snap, extra) {
 }
 
 // ── Jobs ─────────────────────────────────────────────────────────────────────
-const ALERT_COLS = 'id, severity, title, meta, root_cause, created_at, resolved_at, resolved_by, resolution_notes, device_name, device_ip, location, detection_method'
+const ALERT_COLS = 'id, severity, title, meta, root_cause, created_at, resolved_at, resolved_by, resolution_notes, device_name, device_ip, location, detection_method, status'
 
 function columnsMissing(error) {
   if (!error || !/emailed_at|column|schema cache/i.test(error.message)) return false
@@ -130,13 +138,29 @@ function columnsMissing(error) {
 }
 
 async function emailNewAlerts(list) {
-  const since = new Date(Date.now() - NEW_ALERT_WINDOW_MS).toISOString()
-  // Claim the alerts first so a second process can never send them again
-  const { data: claimed, error } = await db.from('alerts')
-    .update({ emailed_at: new Date().toISOString() })
-    .is('emailed_at', null).in('severity', ['crit', 'warn']).eq('suppressed', false).gte('created_at', since)
-    .select(ALERT_COLS)
-  if (columnsMissing(error) || !claimed?.length) return
+  const now = Date.now()
+  const iso = ms => new Date(ms).toISOString()
+  const stamp = { emailed_at: iso(now) }
+  // Claim the alerts first so a second process can never send them again.
+  //  • Offline / not responding: only once the device has stayed offline for
+  //    OFFLINE_EMAIL_DELAY (the alert is still open). One that comes back
+  //    sooner is never emailed (and so gets no "resolved" email either).
+  //  • Everything else (CPU / memory critical, warnings): right away.
+  const [offline, other] = await Promise.all([
+    db.from('alerts').update(stamp)
+      .is('emailed_at', null).eq('status', 'offline').eq('suppressed', false).is('resolved_at', null)
+      .lte('created_at', iso(now - OFFLINE_EMAIL_DELAY_MS))
+      .gte('created_at', iso(now - OFFLINE_EMAIL_DELAY_MS - NEW_ALERT_WINDOW_MS))
+      .select(ALERT_COLS),
+    db.from('alerts').update(stamp)
+      .is('emailed_at', null).in('severity', ['crit', 'warn']).eq('suppressed', false)
+      .or('status.is.null,status.neq.offline')
+      .gte('created_at', iso(now - NEW_ALERT_WINDOW_MS))
+      .select(ALERT_COLS),
+  ])
+  if (columnsMissing(offline.error) || columnsMissing(other.error)) return
+  const claimed = [...(offline.data ?? []), ...(other.data ?? [])]
+  if (!claimed.length) return
   claimed.sort((a, b) => a.created_at.localeCompare(b.created_at))
 
   const crit = claimed.filter(a => a.severity === 'crit')
@@ -147,14 +171,18 @@ async function emailNewAlerts(list) {
   // Recipients of warnings get one email with both kinds
   const both = new Set(groups[1].to)
   try {
+    let emails = 0, people = 0
     if (both.size && claimed.length) {
       await send([...both], `[SecureNet] ${crit.length} critical · ${claimed.length - crit.length} warning`, alertsHtml(claimed))
+      emails++; people += both.size
     }
     const critOnly = groups[0].to.filter(e => !both.has(e))
     if (critOnly.length && crit.length) {
       await send(critOnly, `[SecureNet] ${crit.length === 1 ? crit[0].title : `${crit.length} critical alerts`}`, alertsHtml(crit))
+      emails++; people += critOnly.length
     }
-    console.log(`  [email] sent ${claimed.length} alert(s) to ${new Set([...both, ...critOnly]).size} recipient(s)`)
+    // Alerts nobody asked for (e.g. warnings when every recipient is "critical only") are just marked
+    if (emails) console.log(`  [email] sent ${emails} email(s) to ${people} recipient(s) about ${claimed.length} alert(s)`)
   } catch (e) {
     // Release the claim so the next round tries again
     await db.from('alerts').update({ emailed_at: null }).in('id', claimed.map(a => a.id))
