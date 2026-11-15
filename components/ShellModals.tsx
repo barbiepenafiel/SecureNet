@@ -4,6 +4,7 @@ import { useState } from 'react'
 import Modal from './Modal'
 import { supabase } from '@/lib/supabase'
 import { useBuildings, locationOptions } from '@/lib/buildings'
+import type { MaintenanceWindow } from '@/lib/database.types'
 
 // ── Add Device (verified live: ICMP · ARP · SNMP) ─────────
 const DEVICE_TYPES = ['Router', 'Switch', 'Access Point', 'Firewall', 'Server', 'Computer', 'Client']
@@ -217,32 +218,68 @@ function AddDeviceModal({ onClose }: { onClose: () => void }) {
 }
 
 // ── Maintenance Window ────────────────────────────────────
-function MaintenanceModal({ onClose }: { onClose: () => void }) {
-  const [form, setForm] = useState({
-    name: '', devices: '', starts_at: '', ends_at: '', recurrence: 'Once', note: '',
-  })
+// ISO timestamp → value for <input type="datetime-local"> in the browser's local time
+function toLocalInput(iso: string) {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return ''
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+function MaintenanceModal({ existing, onClose }: { existing: MaintenanceWindow | null; onClose: () => void }) {
+  const [form, setForm] = useState(existing
+    ? { name: existing.name, devices: existing.devices, starts_at: toLocalInput(existing.starts_at),
+        ends_at: toLocalInput(existing.ends_at), recurrence: existing.recurrence || 'Once', note: existing.note ?? '' }
+    : { name: '', devices: '', starts_at: '', ends_at: '', recurrence: 'Once', note: '' })
   const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  function done() {
+    window.dispatchEvent(new Event('maintenance-changed'))
+    onClose()
+  }
 
   async function save() {
-    if (!form.name || !form.starts_at || !form.ends_at) return
+    setErr(null)
+    if (!form.name.trim() || !form.starts_at || !form.ends_at) { setErr('Name, start and end are required'); return }
+    // datetime-local has no timezone — convert from the browser's local time
+    const starts = new Date(form.starts_at), ends = new Date(form.ends_at)
+    if (ends <= starts) { setErr('End must be after start'); return }
     setSaving(true)
-    await supabase.from('maintenance_windows').insert({
-      name: form.name, devices: form.devices, starts_at: form.starts_at,
-      ends_at: form.ends_at, recurrence: form.recurrence, note: form.note, status: 'Scheduled',
-    })
+    const row = {
+      name: form.name.trim(), devices: form.devices.trim(), starts_at: starts.toISOString(),
+      ends_at: ends.toISOString(), recurrence: form.recurrence, note: form.note.trim() || null,
+    }
+    const { error } = existing
+      ? await supabase.from('maintenance_windows').update(row).eq('id', existing.id)
+      : await supabase.from('maintenance_windows').insert({ ...row, status: 'Scheduled' })
     setSaving(false)
-    onClose()
+    if (error) { setErr(error.message); return }
+    done()
+  }
+
+  async function remove() {
+    if (!existing || !confirm(`Delete maintenance window "${existing.name}"?`)) return
+    setSaving(true); setErr(null)
+    const { error } = await supabase.from('maintenance_windows').delete().eq('id', existing.id)
+    setSaving(false)
+    if (error) { setErr(error.message); return }
+    done()
   }
 
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
     setForm(f => ({ ...f, [k]: e.target.value }))
 
   return (
-    <Modal title="New Maintenance Window" onClose={onClose}
+    <Modal title={existing ? 'Edit Maintenance Window' : 'New Maintenance Window'} onClose={onClose}
       footer={<>
+        {existing && (
+          <button suppressHydrationWarning className="btn" style={{ color: 'var(--crit)', marginRight: 'auto' }}
+                  onClick={remove} disabled={saving}>Delete</button>
+        )}
         <button suppressHydrationWarning className="btn" onClick={onClose}>Cancel</button>
         <button suppressHydrationWarning className="btn btn-primary" onClick={save} disabled={saving}>
-          {saving ? 'Saving…' : 'Save Window'}
+          {saving ? 'Saving…' : existing ? 'Save Changes' : 'Save Window'}
         </button>
       </>}
     >
@@ -275,6 +312,7 @@ function MaintenanceModal({ onClose }: { onClose: () => void }) {
         <textarea suppressHydrationWarning className="form-textarea" placeholder="Reason for maintenance…" value={form.note}
           onChange={set('note')} />
       </div>
+      {err && <div style={{ color: 'var(--crit)', fontSize: 13 }}>{err}</div>}
     </Modal>
   )
 }
@@ -282,15 +320,20 @@ function MaintenanceModal({ onClose }: { onClose: () => void }) {
 // ── Shell wrapper (rendered inside layout) ─────────────────
 export default function ShellModals() {
   const [modal, setModal] = useState<'addDevice' | 'maintenance' | null>(null)
+  const [editing, setEditing] = useState<MaintenanceWindow | null>(null)
 
   // Expose open functions via custom events so Topbar can trigger them
   if (typeof window !== 'undefined') {
     (window as unknown as Record<string, unknown>).__openAddDevice    = () => setModal('addDevice')
-    ;(window as unknown as Record<string, unknown>).__openMaintenance = () => setModal('maintenance')
+    ;(window as unknown as Record<string, unknown>).__openMaintenance = (w?: MaintenanceWindow) => {
+      // Called from a click handler with an event, or with a window row to edit
+      setEditing(w && typeof w === 'object' && 'id' in w ? w : null)
+      setModal('maintenance')
+    }
   }
 
   if (!modal) return null
   if (modal === 'addDevice')   return <AddDeviceModal   onClose={() => setModal(null)} />
-  if (modal === 'maintenance') return <MaintenanceModal onClose={() => setModal(null)} />
+  if (modal === 'maintenance') return <MaintenanceModal key={editing?.id ?? 'new'} existing={editing} onClose={() => setModal(null)} />
   return null
 }

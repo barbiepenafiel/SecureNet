@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '@/lib/supabase'
 import Modal from '@/components/Modal'
-import type { AlertConfig } from '@/lib/database.types'
+import type { AlertConfig, MaintenanceWindow } from '@/lib/database.types'
 import { useAuth } from '@/components/AuthProvider'
 import ManageSection from '@/components/ManageSection'
 import { useBuildings } from '@/lib/buildings'
@@ -235,7 +235,80 @@ function UsersPanel() {
   )
 }
 
-const DEFAULT_CFG: Omit<AlertConfig, 'id' | 'updated_at' | 'updated_by'> = {
+function openMaintenance(w?: MaintenanceWindow) {
+  (window as unknown as Record<string, (w?: MaintenanceWindow) => void>).__openMaintenance?.(w)
+}
+
+function fmtWhen(iso: string) {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return '—'
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+// Status from the window's own times (one-off windows end; recurring ones stay scheduled)
+function windowStatus(w: MaintenanceWindow): { label: string; cls: string } {
+  const now = Date.now(), s = new Date(w.starts_at).getTime(), e = new Date(w.ends_at).getTime()
+  if (now >= s && now < e) return { label: 'Active', cls: 'chip-ok' }
+  if (now < s) return { label: 'Upcoming', cls: 'chip-warn' }
+  if ((w.recurrence || 'Once') !== 'Once') return { label: 'Scheduled', cls: 'chip-maint' }
+  return { label: 'Completed', cls: 'chip-off' }
+}
+
+function MaintenancePanel() {
+  const [rows, setRows] = useState<MaintenanceWindow[] | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  async function load() {
+    const { data, error } = await supabase.from('maintenance_windows').select('*').order('starts_at', { ascending: false })
+    if (error) { setErr(error.message); setRows([]); return }
+    setErr(null)
+    setRows((data ?? []) as MaintenanceWindow[])
+  }
+  useEffect(() => {
+    load()
+    const onChange = () => load()
+    window.addEventListener('maintenance-changed', onChange)
+    return () => window.removeEventListener('maintenance-changed', onChange)
+  }, [])
+
+  return (
+    <div className="card">
+      <div className="card-header">
+        Maintenance Windows
+        <div className="card-header-actions">
+          <button suppressHydrationWarning className="btn btn-primary btn-sm" onClick={() => openMaintenance()}>+ New Window</button>
+        </div>
+      </div>
+      {err && <div style={{ padding: '10px 16px', color: 'var(--crit)', fontSize: 13 }}>{err}</div>}
+      <div style={{ overflowX: 'auto' }}>
+        <table className="tbl">
+          <thead><tr><th>Name</th><th>Devices</th><th>Start</th><th>End</th><th>Recurrence</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            {rows === null && <tr><td colSpan={7} style={{ color: 'var(--text3)' }}>Loading…</td></tr>}
+            {rows?.length === 0 && !err && <tr><td colSpan={7} style={{ color: 'var(--text3)' }}>No maintenance windows yet.</td></tr>}
+            {rows?.map(w => {
+              const st = windowStatus(w)
+              return (
+                <tr key={w.id}>
+                  <td>{w.name}</td>
+                  <td>{w.devices || '—'}</td>
+                  <td>{fmtWhen(w.starts_at)}</td>
+                  <td>{fmtWhen(w.ends_at)}</td>
+                  <td>{w.recurrence || 'Once'}</td>
+                  <td><span className={`chip ${st.cls}`}>{st.label}</span></td>
+                  <td><button suppressHydrationWarning className="btn btn-sm" onClick={() => openMaintenance(w)}>Edit</button></td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+const DEFAULT_CFG:Omit<AlertConfig, 'id' | 'updated_at' | 'updated_by'> = {
   cpu_warn_pct: 80, cpu_crit_pct: 95,
   mem_warn_pct: 85, mem_crit_pct: 95,
   latency_warn_ms: 100, latency_crit_ms: 250,
@@ -395,25 +468,7 @@ SMTP_PASS=your-app-password`}
       {tab === 'roles' && <UsersPanel />}
 
       {/* ── Maintenance ── */}
-      {tab === 'maint' && (
-        <div className="card">
-          <div className="card-header">
-            Maintenance Windows
-            <div className="card-header-actions">
-              <button suppressHydrationWarning className="btn btn-primary btn-sm" onClick={() => (window as unknown as Record<string,()=>void>).__openMaintenance?.()}>+ New Window</button>
-            </div>
-          </div>
-          <div style={{ overflowX: 'auto' }}>
-            <table className="tbl">
-              <thead><tr><th>Name</th><th>Devices</th><th>Start</th><th>End</th><th>Recurrence</th><th>Status</th><th></th></tr></thead>
-              <tbody>
-                <tr><td>Weekly Patch Night</td><td>All switches</td><td>Sat 23:00</td><td>Sun 03:00</td><td>Weekly</td><td><span className="chip chip-maint">Scheduled</span></td><td><button suppressHydrationWarning className="btn btn-sm">Edit</button></td></tr>
-                <tr><td>Bldg B UPS Replacement</td><td>SW-B2, AP-B-01</td><td>2026-11-06 08:00</td><td>2026-11-06 12:00</td><td>Once</td><td><span className="chip chip-warn">Upcoming</span></td><td><button suppressHydrationWarning className="btn btn-sm">Edit</button></td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+      {tab === 'maint' && <MaintenancePanel />}
 
     </>
   )
