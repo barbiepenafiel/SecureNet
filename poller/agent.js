@@ -327,18 +327,24 @@ async function queryAnnounced(ip) {
   return off && (!on || off > on) ? 'offline' : 'online'
 }
 
-async function insertAlert(dev, kind, method) {
+// kind: 'new' | 'online' (back after an offline alert) | 'offline' |
+//       'reachable' (answered again after an unreachable warning, before it was marked offline)
+async function insertAlert(dev, kind, method, missed = 0) {
   const online = kind !== 'offline'
   const discovered = dev.source === 'discovered'
   const meta = `${discovered ? '[Discovered] ' : ''}IP: ${dev.ip} · MAC: ${dev.mac ?? '—'} · Location: ${dev.location || 'Unassigned'} · Method: ${method} · Status: ${online ? 'Online' : 'Offline'}`
   const base = {
     severity:   online ? 'info' : 'crit',
-    title:      kind === 'new' ? `${dev.name} connected (new device)` : online ? `${dev.name} is back online` : `${dev.name} is offline`,
+    title:      kind === 'new' ? `${dev.name} connected (new device)`
+      : kind === 'reachable' ? `${dev.name} is reachable again`
+      : online ? `${dev.name} is back online` : `${dev.name} is offline`,
     meta,
     acked:      online,
     suppressed: false,
     root_cause: kind === 'new'
       ? `First seen on ${dev.subnet ?? 'the network'} via ${method}`
+      : kind === 'reachable'
+        ? `Answered via ${method} after ${missed} missed check${missed === 1 ? '' : 's'} — recovered before it was marked offline`
       : online
         ? `Device answered via ${method}`
         : `No ICMP or ARP response from ${dev.ip} for ${FAILS_BEFORE_OFFLINE} consecutive checks — check cable, power or Wi-Fi`,
@@ -356,6 +362,61 @@ async function insertAlert(dev, kind, method) {
       .update({ acked: true, resolved_at: new Date().toISOString(), resolved_by: SYSTEM_USER, resolution_notes: 'Device is back online' })
       .ilike('meta', `%IP: ${dev.ip} %`).eq('severity', 'crit').is('resolved_at', null)
   }
+}
+
+// ── Warning: unreachable (before it is confirmed offline) ────────────────────
+// The first missed check raises one Warning per incident. It is resolved when
+// the device answers again (followed by a "reachable again" Information
+// alert) or when the device is confirmed offline (the Critical alert takes
+// over). Duplicates are checked in the database, so restarts don't repeat it.
+// Not emailed (emailed_at is pre-set): it lasts at most FAILS_BEFORE_OFFLINE
+// checks, and the offline alert that may follow is emailed as before.
+const unreachableWarned = new Set()   // device ids with an open unreachable warning
+const unreachableSynced = new Set()   // device ids checked for a leftover warning since the agent started
+
+function openUnreachableQuery(ip) {
+  return supabase.from('alerts').select('id')
+    .ilike('meta', `%IP: ${ip} %`).eq('severity', 'warn').ilike('title', '%is unreachable').is('resolved_at', null)
+}
+
+async function raiseUnreachableWarning(dev, fails) {
+  if (unreachableWarned.has(dev.id)) return
+  unreachableWarned.add(dev.id)
+  const { data: open } = await openUnreachableQuery(dev.ip).limit(1)
+  if (open?.length) return
+  const method = `ICMP/ARP${dev.snmp_community && dev.source !== 'discovered' ? '/SNMP' : ''}`
+  const base = {
+    severity:   'warn',
+    title:      `${dev.name} is unreachable`,
+    meta:       `${dev.source === 'discovered' ? '[Discovered] ' : ''}IP: ${dev.ip} · MAC: ${dev.mac ?? '—'} · Location: ${dev.location || 'Unassigned'} · Method: ${method} · Status: Unreachable`,
+    acked:      false,
+    suppressed: false,
+    root_cause: `No response from ${dev.ip} (missed ${fails} of ${FAILS_BEFORE_OFFLINE} checks). It will be marked offline if it misses ${FAILS_BEFORE_OFFLINE} checks in a row.`,
+  }
+  const full = { ...base, device_name: dev.name, device_ip: dev.ip, device_mac: dev.mac ?? null,
+    location: dev.location || 'Unassigned', detection_method: method, emailed_at: new Date().toISOString() }
+  const { error } = await supabase.from('alerts').insert(full)
+  if (error && /column|schema cache/i.test(error.message)) {
+    // Older schema (no emailed_at means email isn't set up either): drop that column, then the detail columns
+    const { emailed_at, ...noEmail } = full
+    const { error: e2 } = await supabase.from('alerts').insert(noEmail)
+    if (e2 && /column|schema cache/i.test(e2.message)) await supabase.from('alerts').insert(base)
+  }
+  console.log(`  [warning] ${dev.name} ${dev.ip} unreachable (${fails}/${FAILS_BEFORE_OFFLINE})`)
+}
+
+// → true when an open unreachable warning was closed
+async function resolveUnreachableWarning(dev, ips, note) {
+  unreachableWarned.delete(dev.id)
+  let closed = false
+  for (const ip of new Set(ips)) {
+    const { data } = await supabase.from('alerts')
+      .update({ acked: true, resolved_at: new Date().toISOString(), resolved_by: SYSTEM_USER, resolution_notes: note })
+      .ilike('meta', `%IP: ${ip} %`).eq('severity', 'warn').ilike('title', '%is unreachable').is('resolved_at', null)
+      .select('id')
+    if (data?.length) closed = true
+  }
+  return closed
 }
 
 // ── Job 1: Discovery + online/offline status ──────────────────────────────────
@@ -755,6 +816,7 @@ async function reconcileDevices(net, icmpMap, neighbors, extraLive = []) {
     const { d, ip, method, latency } = r
 
     if (method) {
+      const missed = deviceFails.get(d.id) ?? 0
       deviceFails.set(d.id, 0)
       const patch = {}
       // Online vs Warning is decided by measured latency (ICMP). With no
@@ -788,12 +850,21 @@ async function reconcileDevices(net, icmpMap, neighbors, extraLive = []) {
         await supabase.from('status_events').insert({ device_id: d.id, device_name: d.name, device_ip: ip, old_status: 'down', new_status: 'up' }).then(() => {}, () => {})
         await recordFlap({ ...d, ip })
       }
+      // Close an open unreachable warning
+      // (checked in the database once after a restart, when the in-memory state is gone)
+      const check = missed > 0 || unreachableWarned.has(d.id) || d.status === 'unreachable' || !unreachableSynced.has(d.id)
+      unreachableSynced.add(d.id)
+      const hadWarning = check && await resolveUnreachableWarning(d, [d.ip, ip], `Answered again via ${method}`)
+      let cameBack = false
       if (await lastAnnounced(ip) === 'offline' || (ip !== d.ip && await lastAnnounced(d.ip) === 'offline')) {
         // Confirm against the database right before alerting (another monitor may have just done it)
         if (await freshAnnounced(ip) === 'offline' || (ip !== d.ip && await freshAnnounced(d.ip) === 'offline')) {
           await insertAlert({ ...d, ip }, 'online', method)
+          cameBack = true
         }
       }
+      // Recovered before it was marked offline
+      if (hadWarning && !cameBack) await insertAlert({ ...d, ip }, 'reachable', method, missed)
       continue
     }
 
@@ -805,6 +876,7 @@ async function reconcileDevices(net, icmpMap, neighbors, extraLive = []) {
       counts.unknown++
       recordSample(d, d.ip, 'unknown', null)
       if (d.status !== 'unknown') await updateDevice(d.id, { status: 'unknown' })
+      if (unreachableWarned.has(d.id)) await resolveUnreachableWarning(d, [d.ip], 'Not checked — the agent left this device’s network')
       continue
     }
 
@@ -814,6 +886,8 @@ async function reconcileDevices(net, icmpMap, neighbors, extraLive = []) {
       counts.unreachable++
       recordSample(d, d.ip, d.status === 'down' ? 'down' : 'unreachable', null)
       if (d.status === 'up' || d.status === 'unknown') await updateDevice(d.id, { status: 'unreachable' })
+      // Warning first; Critical follows if it stays unreachable (below)
+      if (d.status !== 'down' && await lastAnnounced(d.ip) !== 'offline') await raiseUnreachableWarning(d, fails)
       continue
     }
 
@@ -834,6 +908,10 @@ async function reconcileDevices(net, icmpMap, neighbors, extraLive = []) {
     if (graceOk && await lastAnnounced(d.ip) !== 'offline' && await freshAnnounced(d.ip) !== 'offline') {
       console.log(`  [status] ${d.name} ${d.ip} is offline`)
       await insertAlert(d, 'offline', `No response (ICMP ×${FAILS_BEFORE_OFFLINE}, ARP${d.snmp_community && d.source !== 'discovered' ? ', SNMP' : ''})`)
+      // The unreachable warning is replaced by the offline (Critical) alert
+      await resolveUnreachableWarning(d, [d.ip], 'Confirmed offline — replaced by the offline alert')
+    } else if (unreachableWarned.has(d.id) && await lastAnnounced(d.ip) === 'offline') {
+      await resolveUnreachableWarning(d, [d.ip], 'Confirmed offline — replaced by the offline alert')
     }
   }
 

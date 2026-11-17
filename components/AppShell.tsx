@@ -6,7 +6,6 @@ import Sidebar from '@/components/Sidebar'
 import TopbarShell from '@/components/TopbarShell'
 import ShellModals from '@/components/ShellModals'
 import AIInsightsButton from '@/components/AIInsightsButton'
-import ToastNotifications from '@/components/ToastNotifications'
 import PingMonitor from '@/components/PingMonitor'
 
 // The login page renders on its own; every other page gets the full app frame.
@@ -40,7 +39,6 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       <PingMonitor />
       <ShellModals />
       <AIInsightsButton />
-      <ToastNotifications />
     </>
   )
 }
