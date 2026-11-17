@@ -1,11 +1,12 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
 import Modal from '@/components/Modal'
 import { useAuth } from '@/components/AuthProvider'
 import type { Alert } from '@/lib/database.types'
 import { alertDetails } from '@/lib/alert-details'
+import Pagination, { usePager, clampPage } from '@/components/Pagination'
 
 function DetailField({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (
@@ -131,27 +132,98 @@ const TAB_LABEL: Record<Tab, string> = {
   resolved: 'Resolved',
 }
 
+const TABS: Tab[] = ['all', 'active', 'critical', 'warning', 'online', 'resolved']
+type Counts = Record<Tab, number>
+const NO_COUNTS: Counts = { all: 0, active: 0, critical: 0, warning: 0, online: 0, resolved: 0 }
+
+// The tab filters, applied in the database (same rules as before: "Back
+// Online" = alertDetails() status 'online' — the status column, or for
+// older rows "Status: Online" in meta / "back online" in the title)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function withTab(q: any, t: Tab) {
+  if (t === 'active')   return q.eq('acked', false).eq('suppressed', false).is('resolved_at', null)
+  if (t === 'critical') return q.eq('severity', 'crit').is('resolved_at', null)
+  if (t === 'warning')  return q.eq('severity', 'warn').is('resolved_at', null)
+  if (t === 'online')   return q.or('status.eq.online,and(status.is.null,or(meta.ilike."*Status: Online*",title.ilike."*back online*"))')
+  if (t === 'resolved') return q.not('resolved_at', 'is', null)
+  return q
+}
+
 export default function AlertsPage() {
   const [alerts,    setAlerts]  = useState<Alert[]>([])
   const [tab,       setTab]     = useState<Tab>('all')
   // Opening Alerts from the sidebar always starts on "Today"
   const [period,    setPeriod]  = useState<Period>('today')
   const [resolving, setResolving] = useState<Alert | null>(null)
+  const [counts,    setCounts]  = useState<Counts>(NO_COUNTS)
+  const [total,     setTotal]   = useState(0)          // rows in this tab (up to the snapshot time on later pages)
+  const [olderOpen, setOlderOpen] = useState(0)
+  const [loading,   setLoading] = useState(true)
+  const pager = usePager(`${tab}|${period}`, 25)
+  const { page, pageSize, offset, setPage } = pager
+
+  // Most recent activity first: when it was resolved, otherwise when it was
+  // raised — so an alert you just resolved moves to the top. Needs the
+  // last_activity column (supabase/migration_pagination.sql); until then: raised time.
+  const sortCol = useRef<'last_activity' | 'created_at'>('last_activity')
+  // Pages after the first are a snapshot (rows up to this time), so new
+  // alerts don't push rows onto the next page and show them twice
+  const anchor = useRef<string | null>(null)
+  if (page === 1) anchor.current = null
+  else if (!anchor.current) anchor.current = new Date().toISOString()
+  const reqId = useRef(0)
 
   const load = useCallback(async () => {
-    const { data } = await supabase.from('alerts').select('*').order('created_at', { ascending: false })
-    setAlerts(data ?? [])
-  }, [])
+    const id = ++reqId.current
+    setLoading(true)
+    const since = periodStart(period)
+    const sinceIso = since === null ? null : new Date(since).toISOString()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const inPeriod = (q: any) => sinceIso ? q.gte('created_at', sinceIso) : q
+    const head = () => supabase.from('alerts').select('id', { count: 'exact', head: true })
+
+    const pageQuery = (col: 'last_activity' | 'created_at') => {
+      let q = withTab(inPeriod(supabase.from('alerts').select('*', { count: 'exact' })), tab)
+      if (anchor.current) q = q.lte(col, anchor.current)
+      return q.order(col, { ascending: false }).order('id', { ascending: false }).range(offset, offset + pageSize - 1)
+    }
+    const [rows, older, ...tabCounts] = await Promise.all([
+      pageQuery(sortCol.current),
+      // Problems still open but raised before the period — don't let them disappear silently
+      sinceIso
+        ? head().lt('created_at', sinceIso).is('resolved_at', null).eq('suppressed', false).neq('severity', 'info')
+        : Promise.resolve({ count: 0 }),
+      ...TABS.map(t => withTab(inPeriod(head()), t)),
+    ])
+    let res = rows
+    if (res.error && sortCol.current === 'last_activity' && /last_activity/.test(res.error.message)) {
+      sortCol.current = 'created_at'
+      res = await pageQuery('created_at')
+    }
+    if (id !== reqId.current) return                // a newer request is on its way
+    setAlerts((res.data ?? []) as Alert[])
+    setTotal(res.count ?? 0)
+    setOlderOpen(older.count ?? 0)
+    setCounts(Object.fromEntries(TABS.map((t, i) => [t, tabCounts[i].count ?? 0])) as Counts)
+    setLoading(false)
+    // The page no longer exists (e.g. alerts were resolved out of this tab)
+    const last = clampPage(page, pageSize, res.count ?? 0)
+    if (last !== page) setPage(last)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, period, page, pageSize, offset])
 
   useEffect(() => { load() }, [load])
 
   useEffect(() => {
+    // Live: refresh the current page and the counts (debounced — the agent writes alerts in bursts)
+    let t: ReturnType<typeof setTimeout> | null = null
+    const soon = () => { if (t) clearTimeout(t); t = setTimeout(load, 800) }
     const ch = supabase.channel('alerts-rt')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'alerts' }, load)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'alerts' }, soon)
       .subscribe()
     // Backup refresh every 5 s in case realtime isn't enabled for alerts
     const poll = setInterval(() => { if (document.visibilityState === 'visible') load() }, 5_000)
-    return () => { supabase.removeChannel(ch); clearInterval(poll) }
+    return () => { supabase.removeChannel(ch); clearInterval(poll); if (t) clearTimeout(t) }
   }, [load])
 
   async function acknowledge(id: number) {
@@ -186,38 +258,9 @@ export default function AlertsPage() {
     load()
   }
 
-  const isOnline = (a: Alert) => alertDetails(a).status === 'online'
-
-  // ── Period: only alerts raised in this window ──
-  const since = periodStart(period)
-  const inPeriod = (a: Alert) => since === null || new Date(a.created_at).getTime() >= since
-  const periodAlerts = alerts.filter(inPeriod)
-  // Problems still open but raised before the period — don't let them disappear silently
-  const olderOpen = alerts.filter(a => !inPeriod(a) && !a.resolved_at && !a.suppressed && a.severity !== 'info').length
-
-  const filtered = periodAlerts.filter(a => {
-    if (tab === 'active')   return !a.acked && !a.suppressed && !a.resolved_at
-    if (tab === 'critical') return a.severity === 'crit' && !a.resolved_at
-    if (tab === 'warning')  return a.severity === 'warn' && !a.resolved_at
-    if (tab === 'online')   return isOnline(a)
-    if (tab === 'resolved') return !!a.resolved_at
-    return true
-  })
-
-  // Newest first
-  // Most recent activity first: when it was resolved, otherwise when it was raised —
-  // so an alert you just resolved moves to the top
-  const lastActivity = (a: Alert) => new Date(a.resolved_at ?? a.created_at).getTime()
-  const visible = [...filtered].sort((a, b) => lastActivity(b) - lastActivity(a))
-
-  const counts = {
-    all:      periodAlerts.length,
-    active:   periodAlerts.filter(a => !a.acked && !a.suppressed && !a.resolved_at).length,
-    critical: periodAlerts.filter(a => a.severity === 'crit' && !a.resolved_at).length,
-    warning:  periodAlerts.filter(a => a.severity === 'warn' && !a.resolved_at).length,
-    online:   periodAlerts.filter(isOnline).length,
-    resolved: periodAlerts.filter(a => !!a.resolved_at).length,
-  }
+  const visible = alerts
+  // New alerts in this tab since the snapshot of the later pages was taken
+  const newer = anchor.current ? Math.max(0, counts[tab] - total) : 0
 
   return (
     <>
@@ -255,10 +298,24 @@ export default function AlertsPage() {
         </div>
       )}
 
+      {newer > 0 && (
+        <div style={{
+          marginBottom: 12, padding: '7px 14px', borderRadius: 'var(--r)', fontSize: 12.5,
+          background: 'rgba(8,145,178,.08)', border: '1px solid rgba(8,145,178,.25)', color: 'var(--info)',
+        }}>
+          {newer} newer alert{newer === 1 ? '' : 's'} since you left the first page.{' '}
+          <button suppressHydrationWarning onClick={() => setPage(1)}
+            style={{ background: 'none', border: 'none', padding: 0, color: 'var(--info)', cursor: 'pointer', fontSize: 12.5, fontWeight: 600, textDecoration: 'underline' }}>
+            Show latest
+          </button>
+        </div>
+      )}
+
       <div className="card" style={{ marginBottom: 14 }}>
+        <div className={loading && visible.length ? 'pager-busy' : undefined}>
         {visible.length === 0 && (
           <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)' }}>
-            No alerts in this category {period === 'all' ? '' : PERIOD_WHEN[period]}.
+            {loading ? 'Loading alerts…' : `No alerts in this category ${period === 'all' ? '' : PERIOD_WHEN[period]}.`}
           </div>
         )}
         {visible.map(a => {
@@ -341,6 +398,11 @@ export default function AlertsPage() {
           </div>
           )
         })}
+        </div>
+        {total > 0 && (
+          <Pagination page={page} pageSize={pageSize} total={total} loading={loading} label="alerts"
+            onPage={setPage} onPageSize={pager.setPageSize} />
+        )}
       </div>
 
       {/* Escalation policy */}

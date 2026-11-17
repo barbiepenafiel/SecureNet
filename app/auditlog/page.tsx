@@ -1,15 +1,30 @@
 import { createServerClient } from '@/lib/supabase'
 import type { AuditEntry } from '@/lib/database.types'
 import LiveRefresh from '@/components/LiveRefresh'
+import { UrlPagination } from '@/components/Pagination'
+
+const PAGE_SIZES = [10, 25, 50, 100]   // same choices as the Per page selector
 
 const LIVE_TABLES = ['audit_log']
 
 export const dynamic = 'force-dynamic'
 
-export default async function AuditLogPage() {
+// Newest first, one page per request: ?page=2&size=50 (25 per page by default)
+export default async function AuditLogPage({ searchParams }: { searchParams: Promise<{ page?: string; size?: string }> }) {
+  const sp = await searchParams
+  const size = PAGE_SIZES.includes(Number(sp.size)) ? Number(sp.size) : 25
+  let page = Math.max(1, Math.floor(Number(sp.page)) || 1)
+
   const db = createServerClient()
-  const { data } = await db.from('audit_log').select('*').order('logged_at', { ascending: false }).limit(100)
+  const fetchPage = (p: number) => db.from('audit_log').select('*', { count: 'exact' })
+    .order('logged_at', { ascending: false }).order('id', { ascending: false })
+    .range((p - 1) * size, p * size - 1)
+  let { data, count } = await fetchPage(page)
+  // Past the last page (e.g. an old link): show the last page instead
+  const pages = Math.max(1, Math.ceil((count ?? 0) / size))
+  if (page > pages) { page = pages; ({ data, count } = await fetchPage(page)) }
   const entries = (data ?? []) as AuditEntry[]
+  const total = count ?? entries.length
 
   return (
     <>
@@ -51,6 +66,7 @@ export default async function AuditLogPage() {
             </tbody>
           </table>
         </div>
+        {total > 0 && <UrlPagination page={page} pageSize={size} total={total} label="entries" />}
       </div>
     </>
   )

@@ -428,3 +428,33 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
   }
   .notif-bell { width: 36px; height: 36px; }
 }
+
+/* ── Pagination (components/Pagination.tsx) ── */
+.pager { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 10px 16px; border-top: 1px solid var(--border); background: var(--surface); font-size: 12.5px; color: var(--text2); }
+.pager-info { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pager-info strong { color: var(--text); font-weight: 600; }
+.pager-pages { display: flex; align-items: center; gap: 4px; margin-left: auto; flex-wrap: wrap; }
+.pager-btn {
+  min-width: 32px; height: 32px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  border: 1px solid var(--border2); border-radius: var(--r); background: var(--surface); color: var(--text);
+  font: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer; transition: background .15s, border-color .15s, color .15s;
+}
+.pager-btn:hover:not(:disabled) { background: var(--surface3); border-color: var(--accent); }
+.pager-btn:disabled { opacity: .45; cursor: not-allowed; }
+.pager-num { padding: 0 6px; }
+.pager-num.active { background: var(--accent); border-color: var(--accent2); color: #fff; font-weight: 600; cursor: default; opacity: 1; }
+.pager-gap { padding: 0 4px; color: var(--text3); }
+.pager-size { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.pager-size .form-select { width: auto; padding: 4px 8px; font-size: 12.5px; }
+.pager-spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border2); border-top-color: var(--accent); animation: pagerSpin .7s linear infinite; flex-shrink: 0; }
+@keyframes pagerSpin { to { transform: rotate(360deg); } }
+.pager-busy { opacity: .55; transition: opacity .15s; pointer-events: none; }
+
+@media (max-width: 768px) {
+  .pager { padding: 10px 12px; justify-content: center; }
+  .pager-info { width: 100%; justify-content: center; }
+  .pager-pages { margin-left: 0; justify-content: center; }
+  .pager-word { display: none; }
+  .pager-btn { min-width: 36px; height: 36px; }
+  .pager-size .form-select { font-size: 16px; min-height: 36px; }
+}

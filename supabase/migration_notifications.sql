@@ -70,19 +70,21 @@ AS $$
   ) END;
 $$;
 
--- Newest first. Each row: the whole alert as JSON plus this user's state.
---   p_before       — paging: only alerts older than this time
+-- The signed-in user's notifications, newest first: the whole alert as JSON
+-- plus this user's state. Shared by notification_list and notification_count.
+--   p_before       — only alerts raised before this time (a later page's snapshot)
 --   p_severity     — 'crit' | 'warn' | 'info' | NULL (all)
 --   p_unread_only  — only unread
 --   p_include_cleared — also return alerts this user cleared (history page)
-CREATE OR REPLACE FUNCTION notification_list(
-  p_limit           integer     DEFAULT 20,
+DROP FUNCTION IF EXISTS notification_list(integer, timestamptz, text, boolean, boolean);
+
+CREATE OR REPLACE FUNCTION notification_rows(
   p_before          timestamptz DEFAULT NULL,
   p_severity        text        DEFAULT NULL,
   p_unread_only     boolean     DEFAULT false,
   p_include_cleared boolean     DEFAULT false
 )
-RETURNS TABLE (alert jsonb, is_read boolean, cleared boolean)
+RETURNS TABLE (alert jsonb, is_read boolean, cleared boolean, created_at timestamptz, id bigint)
 LANGUAGE sql STABLE
 SECURITY INVOKER SET search_path = public
 AS $$
@@ -102,15 +104,48 @@ AS $$
       AND (p_severity IS NULL OR a.severity = p_severity)
       AND (p_include_cleared OR r.cleared_at IS NULL)
   )
-  SELECT to_jsonb(n) - 'read_at' - 'cleared_at' - 'is_read', n.is_read, n.cleared_at IS NOT NULL
+  SELECT to_jsonb(n) - 'read_at' - 'cleared_at' - 'is_read', n.is_read, n.cleared_at IS NOT NULL, n.created_at, n.id
   FROM n
-  WHERE NOT p_unread_only OR NOT n.is_read
-  ORDER BY n.created_at DESC, n.id DESC
-  LIMIT LEAST(GREATEST(p_limit, 1), 200);
+  WHERE NOT p_unread_only OR NOT n.is_read;
+$$;
+
+-- One page: p_limit rows (max 200) after skipping p_offset
+CREATE OR REPLACE FUNCTION notification_list(
+  p_limit           integer     DEFAULT 20,
+  p_offset          integer     DEFAULT 0,
+  p_before          timestamptz DEFAULT NULL,
+  p_severity        text        DEFAULT NULL,
+  p_unread_only     boolean     DEFAULT false,
+  p_include_cleared boolean     DEFAULT false
+)
+RETURNS TABLE (alert jsonb, is_read boolean, cleared boolean)
+LANGUAGE sql STABLE
+SECURITY INVOKER SET search_path = public
+AS $$
+  SELECT r.alert, r.is_read, r.cleared
+  FROM notification_rows(p_before, p_severity, p_unread_only, p_include_cleared) r
+  ORDER BY r.created_at DESC, r.id DESC
+  LIMIT LEAST(GREATEST(p_limit, 1), 200) OFFSET GREATEST(p_offset, 0);
+$$;
+
+-- How many rows the same filters match (for "Showing 1–25 of N")
+CREATE OR REPLACE FUNCTION notification_count(
+  p_before          timestamptz DEFAULT NULL,
+  p_severity        text        DEFAULT NULL,
+  p_unread_only     boolean     DEFAULT false,
+  p_include_cleared boolean     DEFAULT false
+)
+RETURNS integer
+LANGUAGE sql STABLE
+SECURITY INVOKER SET search_path = public
+AS $$
+  SELECT count(*)::int FROM notification_rows(p_before, p_severity, p_unread_only, p_include_cleared);
 $$;
 
 GRANT EXECUTE ON FUNCTION notification_unread_count() TO authenticated;
-GRANT EXECUTE ON FUNCTION notification_list(integer, timestamptz, text, boolean, boolean) TO authenticated;
+GRANT EXECUTE ON FUNCTION notification_rows(timestamptz, text, boolean, boolean) TO authenticated;
+GRANT EXECUTE ON FUNCTION notification_list(integer, integer, timestamptz, text, boolean, boolean) TO authenticated;
+GRANT EXECUTE ON FUNCTION notification_count(timestamptz, text, boolean, boolean) TO authenticated;
 
 -- Read/clear in one tab updates the bell in the user's other tabs and devices
 DO $$

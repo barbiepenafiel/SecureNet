@@ -26,10 +26,30 @@ export function isMissingMigration(err: { code?: string; message?: string } | nu
 
 export interface ListOptions {
   limit?: number
-  before?: string | null
+  offset?: number
+  before?: string | null        // snapshot time for later pages (rows raised before it)
   severity?: AlertSeverity | null
   unreadOnly?: boolean
   includeCleared?: boolean
+}
+
+// How many notifications match (same filters as listNotifications, without limit/offset)
+export async function countNotifications(opts: ListOptions = {}): Promise<number | null> {
+  const { data, error } = await supabase.rpc('notification_count', {
+    p_before:          opts.before ?? null,
+    p_severity:        opts.severity ?? null,
+    p_unread_only:     opts.unreadOnly ?? false,
+    p_include_cleared: opts.includeCleared ?? false,
+  })
+  if (!error) return typeof data === 'number' ? data : Number(data) || 0
+  if (!isMissingMigration(error)) return null
+  // Before the migration: count the alerts themselves
+  if (opts.unreadOnly) return 0
+  let q = supabase.from('alerts').select('id', { count: 'exact', head: true }).eq('suppressed', false)
+  if (opts.before) q = q.lt('created_at', opts.before)
+  if (opts.severity) q = q.eq('severity', opts.severity)
+  const { count } = await q
+  return count ?? 0
 }
 
 export interface ListResult {
@@ -41,6 +61,7 @@ export interface ListResult {
 export async function listNotifications(opts: ListOptions = {}): Promise<ListResult> {
   const { data, error } = await supabase.rpc('notification_list', {
     p_limit:           opts.limit ?? 20,
+    p_offset:          opts.offset ?? 0,
     p_before:          opts.before ?? null,
     p_severity:        opts.severity ?? null,
     p_unread_only:     opts.unreadOnly ?? false,
@@ -49,8 +70,10 @@ export async function listNotifications(opts: ListOptions = {}): Promise<ListRes
   if (error) {
     if (!isMissingMigration(error)) return { items: [], missingMigration: false, error: error.message }
     // Before the migration: show the alerts themselves, without read state
+    const from = opts.offset ?? 0
     let q = supabase.from('alerts').select('*').eq('suppressed', false)
-      .order('created_at', { ascending: false }).limit(opts.limit ?? 20)
+      .order('created_at', { ascending: false }).order('id', { ascending: false })
+      .range(from, from + (opts.limit ?? 20) - 1)
     if (opts.before) q = q.lt('created_at', opts.before)
     if (opts.severity) q = q.eq('severity', opts.severity)
     const { data: rows, error: e2 } = await q

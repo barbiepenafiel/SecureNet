@@ -6,6 +6,7 @@ import Modal from '@/components/Modal'
 import { useAuth } from '@/components/AuthProvider'
 import type { AgentStatus, Device, ScanResult } from '@/lib/database.types'
 import { useBuildings, locationOptions } from '@/lib/buildings'
+import Pagination, { usePager, clampPage } from '@/components/Pagination'
 
 type SourceFilter = 'all' | 'managed' | 'discovered'
 type StatusFilter = 'all' | 'up' | 'warn' | 'down' | 'maint' | 'unreachable' | 'unknown' | 'attention'
@@ -414,6 +415,13 @@ export default function DevicesPage() {
     })
   }
 
+  // Paged on screen: the whole inventory is already loaded (and kept live)
+  // for the counts above, so every page shows current status. A filter,
+  // search or period change goes back to page 1.
+  const pager = usePager([search, typeF, bldgF, statusF, sourceF, period].join('|'), 25)
+  const devPage = clampPage(pager.page, pager.pageSize, rows.length)
+  const pageRows = rows.slice((devPage - 1) * pager.pageSize, devPage * pager.pageSize)
+
   const deviceTypes = [...new Set(['Router','Switch','Access Point','Server','Firewall', ...devices.map(d => d.type)])]
   const locations   = [...new Set([...buildingNames, ...devices.map(d => d.location).filter(l => !isUnassigned(l))])]
   const onlineCount = periodDevices.filter(d => shownStatus(d) === 'up' || shownStatus(d) === 'warn').length
@@ -534,7 +542,7 @@ export default function DevicesPage() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((row, i) => {
+              {pageRows.map((row, i) => {
                 if (row.kind === 'managed') {
                   const d = row.dev
                   const status = shownStatus(d)
@@ -621,6 +629,10 @@ export default function DevicesPage() {
             </tbody>
           </table>
         </div>
+        {rows.length > 0 && (
+          <Pagination page={devPage} pageSize={pager.pageSize} total={rows.length} label="devices"
+            onPage={pager.setPage} onPageSize={pager.setPageSize} />
+        )}
       </div>
 
       {/* ── Detail modal ── */}

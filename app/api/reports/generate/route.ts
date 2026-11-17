@@ -15,17 +15,22 @@ function adminDb() {
   )
 }
 
-// GET — list saved report snapshots
-export async function GET() {
+// GET — list saved report snapshots, newest first
+//   ?limit=10&offset=20 → one page (default: the newest 90); `total` = all snapshots
+export async function GET(req: Request) {
   const db = adminDb()
+  const params = new URL(req.url).searchParams
+  const limit = Math.min(100, Math.max(1, Number(params.get('limit')) || 90))
+  const offset = Math.max(0, Number(params.get('offset')) || 0)
   try {
-    const { data, error } = await db
+    const { data, error, count } = await db
       .from('report_snapshots')
-      .select('*')
+      .select('*', { count: 'exact' })
       .order('generated_at', { ascending: false })
-      .limit(90)
+      .order('id', { ascending: false })
+      .range(offset, offset + limit - 1)
     if (error) return Response.json({ error: error.message, snapshots: [] }, { status: 500 })
-    return Response.json({ snapshots: data ?? [] })
+    return Response.json({ snapshots: data ?? [], total: count ?? (data ?? []).length })
   } catch {
     return Response.json({ snapshots: [] })
   }

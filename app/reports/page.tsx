@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
 import type { Device, Alert } from '@/lib/database.types'
 import { usePolling } from '@/lib/usePolling'
@@ -11,6 +11,7 @@ import {
   SnmpTrafficVolumeChart, fmtBytes,
 } from '@/components/ReportCharts'
 import type { SnmpReport } from '@/lib/snmp-report'
+import Pagination, { usePager, clampPage } from '@/components/Pagination'
 
 function fmtRate(mbps: number | null) {
   if (mbps === null) return '—'
@@ -105,6 +106,25 @@ interface Availability {
   incidents: { id: number; title: string; device: string | null; ip: string | null; location: string | null; method: string | null; rootCause: string | null; startedAt: string; resolvedAt: string | null; durationMs: number; open: boolean }[]
 }
 
+type Incident = Availability['incidents'][number]
+
+// Critical incidents straight from the alerts table, one page at a time
+// (same fields as core.incidents in poller/report-core.js)
+const INC_COLS = 'id, title, meta, root_cause, created_at, resolved_at, device_name, device_ip, location, detection_method'
+interface IncidentRow { id: number; title: string; meta: string | null; root_cause: string | null; created_at: string; resolved_at: string | null; device_name?: string | null; device_ip?: string | null; location?: string | null; detection_method?: string | null }
+function toIncident(a: IncidentRow): Incident {
+  const start = new Date(a.created_at).getTime()
+  const end = a.resolved_at ? new Date(a.resolved_at).getTime() : Date.now()
+  return {
+    id: a.id, title: a.title,
+    device: a.device_name ?? null, ip: a.device_ip ?? a.meta?.match(/IP: ([\d.]+)/)?.[1] ?? null,
+    location: a.location ?? null, method: a.detection_method ?? null, rootCause: a.root_cause,
+    startedAt: a.created_at, resolvedAt: a.resolved_at, durationMs: end - start, open: !a.resolved_at,
+  }
+}
+// PostgREST list value: "a","b" (quotes escaped)
+const pgList = (vals: Iterable<string>) => [...vals].map(v => `"${v.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`).join(',')
+
 const STATUS_LABEL: Record<string, string> = { up: 'Online', warn: 'Warning', down: 'Offline', unreachable: 'Unreachable', unknown: 'Unknown', maint: 'Maintenance' }
 const isUnassigned = (l: string | null | undefined) => !l || l === 'Unassigned'
 const fmtDur = (ms: number) => fmtMinutes(Math.max(0, Math.round(ms / 60_000)))
@@ -115,8 +135,6 @@ export default function ReportsPage() {
   const [alerts,    setAlerts]    = useState<Alert[]>([])
   const [avail,     setAvail]     = useState<Availability | null>(null)
   const [availErr,  setAvailErr]  = useState<string | null>(null)
-  const [showAll,   setShowAll]   = useState(false)
-  const [showAllInc, setShowAllInc] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [genMsg,    setGenMsg]    = useState<string | null>(null)
   // Filters (device category, location, current status)
@@ -357,12 +375,79 @@ export default function ReportsPage() {
   }, [fDevices, av, pAlerts])
 
   // ── Critical incidents (urgent issues, with duration) ────────
-  const incidents = useMemo(() => (av?.incidents ?? []).filter(i =>
-    !filtering || (!!i.ip && fIps.has(i.ip)) || (!!i.device && fNames.has(i.device))), [av, filtering, fIps, fNames])
-  const openIncidents = incidents.filter(i => i.open).length
-  const visibleInc = showAllInc ? incidents : incidents.slice(0, 10)
+  // Paged in the database; the period and the device filter stay applied
+  const filterKey = filtering ? `${pgList(fIps)}|${pgList(fNames)}` : ''
+  const incPager = usePager(`${period}|${filterKey}`, 10)
+  const [incidents, setIncidents] = useState<Incident[]>([])
+  const [incTotal, setIncTotal] = useState(0)
+  const [openIncidents, setOpenIncidents] = useState(0)
+  const [incLoading, setIncLoading] = useState(true)
+  const [incErr, setIncErr] = useState<string | null>(null)
+  const [exportingInc, setExportingInc] = useState(false)
+  const incReq = useRef(0)
+  // Later pages are a snapshot up to this time, so new incidents don't repeat rows across pages
+  const incAnchor = useRef<string | null>(null)
+  if (incPager.page === 1) incAnchor.current = null
+  else if (!incAnchor.current) incAnchor.current = new Date().toISOString()
 
-  const visibleRows = showAll ? perfRows : perfRows.slice(0, 10)
+  const incQuery = useCallback((select: string, opts?: { count?: 'exact'; head?: boolean }) => {
+    let q = supabase.from('alerts').select(select, opts).eq('severity', 'crit')
+      .gte('created_at', new Date(Date.now() - PERIOD_MS[period]).toISOString())
+    if (filtering) {
+      const ips = pgList(fIps), names = pgList(fNames)
+      const parts = [ips && `device_ip.in.(${ips})`, names && `device_name.in.(${names})`].filter(Boolean)
+      q = parts.length ? q.or(parts.join(',')) : q.eq('id', -1)    // filter matches no device
+    }
+    return q
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [period, filterKey, filtering])
+
+  const loadIncidents = useCallback(async () => {
+    const id = ++incReq.current
+    setIncLoading(true)
+    const { offset, pageSize, page } = incPager
+    let q = incQuery(INC_COLS, { count: 'exact' })
+    if (incAnchor.current) q = q.lte('created_at', incAnchor.current)
+    const [rows, open] = await Promise.all([
+      q.order('created_at', { ascending: false }).order('id', { ascending: false }).range(offset, offset + pageSize - 1),
+      incQuery('id', { count: 'exact', head: true }).is('resolved_at', null),
+    ])
+    if (id !== incReq.current) return
+    setIncErr(rows.error?.message ?? null)
+    setIncidents(((rows.data ?? []) as unknown as IncidentRow[]).map(toIncident))
+    setIncTotal(rows.count ?? 0)
+    setOpenIncidents(open.count ?? 0)
+    setIncLoading(false)
+    const last = clampPage(page, pageSize, rows.count ?? 0)
+    if (last !== page) incPager.setPage(last)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [incQuery, incPager.page, incPager.pageSize])
+  useEffect(() => { loadIncidents() }, [loadIncidents])
+  usePolling(loadIncidents, 30_000)
+
+  // CSV: every incident that matches the period and filter, not just this page
+  async function exportIncidents() {
+    setExportingInc(true)
+    try {
+      const all: Incident[] = []
+      for (let from = 0; from < 50_000; from += 1000) {
+        const { data } = await incQuery(INC_COLS).order('created_at', { ascending: false }).order('id', { ascending: false }).range(from, from + 999)
+        all.push(...((data ?? []) as unknown as IncidentRow[]).map(toIncident))
+        if (!data || data.length < 1000) break
+      }
+      downloadCSV(
+        `incidents-${period}-${new Date().toISOString().slice(0, 10)}.csv`,
+        ['Incident', 'Device', 'IP', 'Location', 'Started', 'Resolved', 'Duration (min)', 'Detected by', 'Cause'],
+        all.map(i => [i.title, i.device, i.ip, i.location, new Date(i.startedAt).toLocaleString(), i.resolvedAt ? new Date(i.resolvedAt).toLocaleString() : 'open',
+          Math.round(i.durationMs / 60_000), i.method, i.rootCause]))
+    } finally { setExportingInc(false) }
+  }
+
+  // ── Device Performance Summary: one row per device, paged on screen ──
+  // (computed from the measurements already loaded for the charts; export has every row)
+  const perfPager = usePager(`${period}|${typeF}|${locF}|${statusF}`, 10)
+  const perfPage = clampPage(perfPager.page, perfPager.pageSize, perfRows.length)
+  const visibleRows = perfRows.slice((perfPage - 1) * perfPager.pageSize, perfPage * perfPager.pageSize)
 
   return (
     <>
@@ -590,21 +675,20 @@ export default function ReportsPage() {
         <div className="card-header">
           Critical Incidents
           <span style={{ fontSize: 11, color: 'var(--text3)', fontWeight: 400 }}>
-            {incidents.length} in this period · {openIncidents} still open · from the agent&apos;s alerts
+            {incTotal.toLocaleString()} in this period · {openIncidents.toLocaleString()} still open · from the agent&apos;s alerts
           </span>
           <div className="card-header-actions">
-            <button suppressHydrationWarning className="btn btn-sm" disabled={!incidents.length} onClick={() => downloadCSV(
-              `incidents-${period}-${new Date().toISOString().slice(0, 10)}.csv`,
-              ['Incident', 'Device', 'IP', 'Location', 'Started', 'Resolved', 'Duration (min)', 'Detected by', 'Cause'],
-              incidents.map(i => [i.title, i.device, i.ip, i.location, new Date(i.startedAt).toLocaleString(), i.resolvedAt ? new Date(i.resolvedAt).toLocaleString() : 'open',
-                Math.round(i.durationMs / 60_000), i.method, i.rootCause]))}>↓ Export CSV</button>
+            <button suppressHydrationWarning className="btn btn-sm" disabled={!incTotal || exportingInc} onClick={exportIncidents}>
+              {exportingInc ? 'Exporting…' : '↓ Export CSV'}
+            </button>
           </div>
         </div>
-        <div style={{ overflowX: 'auto' }}>
+        {incErr && <div style={{ padding: '8px 16px', fontSize: 12, color: 'var(--crit)' }}>Could not load incidents: {incErr}</div>}
+        <div style={{ overflowX: 'auto' }} className={incLoading && incidents.length ? 'pager-busy' : undefined}>
           <table className="tbl">
             <thead><tr><th>Incident</th><th>Location</th><th>Started</th><th>Duration</th><th>Detected by</th><th>Cause</th></tr></thead>
             <tbody>
-              {visibleInc.map(i => (
+              {incidents.map(i => (
                 <tr key={i.id}>
                   <td>
                     <div style={{ fontWeight: 500 }}>{i.title}</div>
@@ -620,17 +704,14 @@ export default function ReportsPage() {
                 </tr>
               ))}
               {!incidents.length && (
-                <tr><td colSpan={6} style={{ textAlign: 'center', padding: 24, color: 'var(--text3)' }}>{av ? 'No critical incidents in this period.' : 'Loading…'}</td></tr>
+                <tr><td colSpan={6} style={{ textAlign: 'center', padding: 24, color: 'var(--text3)' }}>{incLoading ? 'Loading…' : 'No critical incidents in this period.'}</td></tr>
               )}
             </tbody>
           </table>
         </div>
-        {incidents.length > 10 && (
-          <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', textAlign: 'center' }}>
-            <button suppressHydrationWarning className="btn btn-sm" onClick={() => setShowAllInc(v => !v)}>
-              {showAllInc ? '↑ Show Less' : `↓ Show All Incidents (${incidents.length - 10} more)`}
-            </button>
-          </div>
+        {incTotal > 0 && (
+          <Pagination page={incPager.page} pageSize={incPager.pageSize} total={incTotal} loading={incLoading} label="incidents"
+            onPage={incPager.setPage} onPageSize={incPager.setPageSize} />
         )}
       </div>
 
@@ -658,8 +739,8 @@ export default function ReportsPage() {
               </tr>
             </thead>
             <tbody>
-              {visibleRows.map((r, i) => (
-                <tr key={i}>
+              {visibleRows.map(r => (
+                <tr key={`${r.name}|${r.ip}`}>
                   <td>
                     <div style={{ fontWeight: 500 }}>{r.name}</div>
                     <div className="mono" style={{ fontSize: 11, color: 'var(--text3)' }}>{r.ip}</div>
@@ -686,12 +767,9 @@ export default function ReportsPage() {
             </tbody>
           </table>
         </div>
-        {perfRows.length > 10 && (
-          <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', textAlign: 'center' }}>
-            <button suppressHydrationWarning className="btn btn-sm" onClick={() => setShowAll(v => !v)}>
-              {showAll ? '↑ Show Less' : `↓ Show All Devices (${perfRows.length - 10} more)`}
-            </button>
-          </div>
+        {perfRows.length > 0 && (
+          <Pagination page={perfPage} pageSize={perfPager.pageSize} total={perfRows.length} label="devices"
+            onPage={perfPager.setPage} onPageSize={perfPager.setPageSize} />
         )}
       </div>
 
@@ -720,14 +798,25 @@ function ReportSnapshotsPanel({ generating, genMsg, onGenerate }: { generating: 
     avg_uptime_pct: number | null; avg_latency_ms: number | null; top_issue: string; generated_by: string;
   }>>([])
   const [loading, setLoading] = useState(true)
+  const [total, setTotal] = useState(0)
+  const pager = usePager('', 10)
+  const { page, pageSize, offset, setPage } = pager
 
   useEffect(() => {
-    fetch('/api/reports/generate')
+    setLoading(true)
+    fetch(`/api/reports/generate?limit=${pageSize}&offset=${offset}`)
       .then(r => r.json())
-      .then(d => setSnapshots(d.snapshots ?? []))
+      .then(d => {
+        setSnapshots(d.snapshots ?? [])
+        const n = d.total ?? (d.snapshots ?? []).length
+        setTotal(n)
+        const last = clampPage(page, pageSize, n)
+        if (last !== page) setPage(last)
+      })
       .catch(() => {})
       .finally(() => setLoading(false))
-  }, [genMsg]) // reload when a new report is generated
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [genMsg, page, pageSize, offset]) // reload when a new report is generated or the page changes
 
   return (
     <div className="card" style={{ marginTop: 20 }}>
@@ -745,14 +834,15 @@ function ReportSnapshotsPanel({ generating, genMsg, onGenerate }: { generating: 
           </button>
         </div>
       </div>
-      {loading ? (
+      {loading && !snapshots.length ? (
         <div style={{ padding: 20, color: 'var(--text3)', fontSize: 13 }}>Loading snapshots…</div>
       ) : snapshots.length === 0 ? (
         <div style={{ padding: 20, color: 'var(--text3)', fontSize: 13 }}>
           No snapshots yet. Click <strong>Generate Now</strong> to create the first one, or run <code>supabase/report_snapshots.sql</code> in Supabase if the table doesn't exist.
         </div>
       ) : (
-        <div style={{ overflowX: 'auto' }}>
+        <>
+        <div style={{ overflowX: 'auto' }} className={loading ? 'pager-busy' : undefined}>
           <table className="tbl">
             <thead>
               <tr>
@@ -793,6 +883,9 @@ function ReportSnapshotsPanel({ generating, genMsg, onGenerate }: { generating: 
             </tbody>
           </table>
         </div>
+        <Pagination page={page} pageSize={pageSize} total={total} loading={loading} label="snapshots"
+          onPage={setPage} onPageSize={pager.setPageSize} />
+        </>
       )}
     </div>
   )
