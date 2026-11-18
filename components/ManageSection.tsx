@@ -9,6 +9,7 @@ import {
 } from '@/lib/floor-rooms'
 import { RoomLabel, SheetBackground } from '@/components/TopologyHub'
 import { useBuildings, type Building } from '@/lib/buildings'
+import FloorplanDesigner from '@/components/floorplan/FloorplanDesigner'
 
 // Settings → Manage: device details and floor plans / rooms (Network Admins only)
 
@@ -44,7 +45,26 @@ export default function ManageSection() {
       </div>
       {part === 'devices' && <DevicesManager rooms={rooms} roomsManaged={managed} plans={plans}/>}
       {part === 'buildings' && <BuildingsManager/>}
-      {part === 'rooms'   && <RoomsManager rooms={rooms} managed={managed} reload={reload}/>}
+      {part === 'rooms'   && <FloorPlansPart rooms={rooms} managed={managed} reload={reload}/>}
+    </div>
+  )
+}
+
+// Floor plans: the drawing designer (new) or the uploaded drawings with room names (as before)
+function FloorPlansPart({ rooms, managed, reload }: { rooms: FloorRoom[]; managed: boolean; reload: () => void }) {
+  const [view, setView] = useState<'designer' | 'uploaded'>('designer')
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 2, padding: 3, background: 'var(--surface3)', borderRadius: 8, width: 'fit-content', marginBottom: 12 }}>
+        {([['designer', 'Designer'], ['uploaded', 'Uploaded plans & rooms']] as const).map(([k, l]) => (
+          <button suppressHydrationWarning key={k} onClick={() => setView(k)} style={{
+            padding: '5px 14px', borderRadius: 6, fontSize: 12.5, fontWeight: 600, cursor: 'pointer', border: 'none',
+            background: view === k ? 'var(--surface)' : 'transparent', color: view === k ? 'var(--accent2)' : 'var(--text2)',
+            boxShadow: view === k ? '0 1px 3px rgba(15,23,42,.12)' : 'none',
+          }}>{l}</button>
+        ))}
+      </div>
+      {view === 'designer' ? <FloorplanDesigner/> : <RoomsManager rooms={rooms} managed={managed} reload={reload}/>}
     </div>
   )
 }

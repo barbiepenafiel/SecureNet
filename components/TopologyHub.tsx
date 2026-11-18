@@ -11,6 +11,10 @@ import {
   useFloorRooms, useFloorPlans, roomOfDevice, stripRoomLabels, roomsOfSheet, sheetsForLocation, floorLabel,
   type FloorRoom, type FloorSheet,
 } from '@/lib/floor-rooms'
+import { useFloorDesigns } from '@/lib/floor-designs'
+import {
+  designsForLocation, designSheet, designRooms, designDevices, DesignDrawing, type PanelSheet,
+} from '@/components/floorplan/designSheets'
 
 type ViewMode = 'buildings' | 'tree' | 'links' | 'floormap' | 'realtime'
 
@@ -294,9 +298,9 @@ export function SheetBackground({ sheet }: { sheet: FloorSheet }) {
 
 // ─── Building Floor Plan panel ────────────────────────────────────────────────
 
-function BuildingFloorPlan({ building, location, sheets, devices, onBack, live = false, onLiveChange }: {
-  building: string; location: string; sheets: FloorSheet[]
-  devices: Device[]; onBack: () => void; live?: boolean
+function BuildingFloorPlan({ building, location, sheets, devices, allDevs = [], onBack, live = false, onLiveChange }: {
+  building: string; location: string; sheets: PanelSheet[]
+  devices: Device[]; allDevs?: Device[]; onBack: () => void; live?: boolean
   onLiveChange?: (on: boolean) => void   // keeps the View dropdown in step with the Live toggle
 }) {
   const [floorKey, setFloor] = useState<string>(sheets[0]?.key ?? '')
@@ -341,15 +345,24 @@ function BuildingFloorPlan({ building, location, sheets, devices, onBack, live =
     return () => { supabase.removeChannel(ch) }
   }, [location, showLive])
 
-  const rooms     = useMemo(() => sheet ? roomsOfSheet(allRooms, sheet) : [], [allRooms, sheet])
+  // A floor drawn in Settings → Manage → Floor plans → Designer: its rooms are
+  // the room shapes, its devices the markers placed on it (live status)
+  const design = sheet?.design ? sheet : null
+  const devById = useMemo(() => new Map([...allDevs, ...liveDevices].map(d => [d.id, d])), [allDevs, liveDevices])
+  const designed = useMemo(() => design ? designDevices(design, devById) : null, [design, devById])
+  const rooms     = useMemo(() => !sheet ? [] : design ? designRooms(design) : roomsOfSheet(allRooms, sheet), [allRooms, sheet, design])
   // Every room of this building (all floors) — for "not in a room"
-  const bldgRooms = useMemo(() => sheets.flatMap(s => roomsOfSheet(allRooms, s)), [allRooms, sheets])
+  const bldgRooms = useMemo(() => sheets.flatMap(s => s.design ? [] : roomsOfSheet(allRooms, s)), [allRooms, sheets])
   const vbW = sheet?.vbW ?? 1000, vbH = sheet?.vbH ?? 600
 
-  const byRoom = useMemo(() => devicesByRoom(rooms, liveDevices), [rooms, liveDevices])
+  const byRoom = useMemo(() => designed ? designed.byRoom : devicesByRoom(rooms, liveDevices), [designed, rooms, liveDevices])
   // Devices in no room on any floor — listed, not guessed onto the map
-  const unplaced = useMemo(() => liveDevices.filter(d => !roomOfDevice(d, bldgRooms)), [liveDevices, bldgRooms])
-  const onFloor = rooms.flatMap(r => byRoom[r.id] ?? [])
+  // (designed building: devices not placed on any of its floors)
+  const placed = useMemo(() => new Set(sheets.flatMap(s => (s.design?.elements ?? []).filter(e => e.kind === 'device' && e.deviceId).map(e => e.deviceId!))), [sheets])
+  const unplaced = useMemo(() => sheets.some(s => s.design)
+    ? liveDevices.filter(d => !placed.has(d.id))
+    : liveDevices.filter(d => !roomOfDevice(d, bldgRooms)), [liveDevices, bldgRooms, sheets, placed])
+  const onFloor = designed ? designed.onFloor : rooms.flatMap(r => byRoom[r.id] ?? [])
 
   const count = (list: Device[], s: string) => list.filter(d => d.status === s).length
   const chips: [string, number, string][] = [
@@ -376,7 +389,7 @@ function BuildingFloorPlan({ building, location, sheets, devices, onBack, live =
         <div style={{ display: 'flex', gap: 2, padding: 3, background: 'var(--surface3)', borderRadius: 8, marginLeft: 8, flexWrap: 'wrap' }}>
           {sheets.map(s => (
             <button suppressHydrationWarning key={s.key} style={tabBtn(sheet?.key === s.key)} onClick={() => { setFloor(s.key); setFocus(null) }}>
-              {floorLabel(s.floor)}
+              {s.label ?? floorLabel(s.floor)}
             </button>
           ))}
         </div>
@@ -407,12 +420,17 @@ function BuildingFloorPlan({ building, location, sheets, devices, onBack, live =
             width: Math.min(area.w, area.h * (vbW / vbH)), height: Math.min(area.w, area.h * (vbW / vbH)) / (vbW / vbH),
           }}
             onMouseLeave={() => setTip(null)}>
-            {sheet && <SheetBackground sheet={sheet}/>}
-            {/* Room names always; device markers only when Live is on */}
-            <FloorOverlay rooms={rooms} byRoom={byRoom} vbW={vbW} vbH={vbH} focus={focus} showDevices={showLive}
-              onHover={(room, e) => setTip(room && e ? { room, x: e.clientX, y: e.clientY } : null)}/>
+            {design ? (
+              // The finished layout from the designer; device markers when Live is on
+              <DesignDrawing sheet={design} devById={devById} showDevices={showLive} focusRoom={focus}/>
+            ) : (<>
+              {sheet && <SheetBackground sheet={sheet}/>}
+              {/* Room names always; device markers only when Live is on */}
+              <FloorOverlay rooms={rooms} byRoom={byRoom} vbW={vbW} vbH={vbH} focus={focus} showDevices={showLive}
+                onHover={(room, e) => setTip(room && e ? { room, x: e.clientX, y: e.clientY } : null)}/>
+            </>)}
             <div style={{ position: 'absolute', left: 12, bottom: 10, fontSize: 11, fontWeight: 700, letterSpacing: '.08em', color: '#64748b', background: 'rgba(255,255,255,.85)', padding: '3px 9px', borderRadius: 6 }}>
-              {sheet ? floorLabel(sheet.floor).toUpperCase() : ''}
+              {sheet ? (sheet.label ?? floorLabel(sheet.floor)).toUpperCase() : ''}
             </div>
           </div>
           </div>
@@ -423,7 +441,7 @@ function BuildingFloorPlan({ building, location, sheets, devices, onBack, live =
                 <span style={{ width: 9, height: 9, borderRadius: '50%', background: FP_STATUS[k].color }}/>{FP_STATUS[k].label}
               </span>
             ))}
-            <span style={{ marginLeft: 'auto', color: 'var(--text3)' }}>Hover a room marker for its devices</span>
+            <span style={{ marginLeft: 'auto', color: 'var(--text3)' }}>{design ? 'Hover a device for its name, IP and status' : 'Hover a room marker for its devices'}</span>
           </div>
         </div>
 
@@ -467,10 +485,14 @@ function BuildingFloorPlan({ building, location, sheets, devices, onBack, live =
                   NOT IN A ROOM ({unplaced.length})
                 </div>
                 <div style={{ fontSize: 11.5, color: 'var(--text3)', marginBottom: 6 }}>
-                  Assign a room in <a href="/settings?tab=manage" style={{ color: 'var(--accent)' }}>Settings → Manage</a> to place them on the map.
+                  {sheets.some(s => s.design)
+                    ? <>Drag one onto the plan to place it (Network Admins, with Live devices on), or use <a href="/settings?tab=manage" style={{ color: 'var(--accent)' }}>Settings → Manage → Floor plans</a>.</>
+                    : <>Assign a room in <a href="/settings?tab=manage" style={{ color: 'var(--accent)' }}>Settings → Manage</a> to place them on the map.</>}
                 </div>
                 {unplaced.map(d => (
-                  <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, padding: '3px 0' }}>
+                  <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, padding: '3px 0', cursor: design ? 'grab' : undefined }}
+                    draggable={!!design} title={design ? 'Drag onto the floor plan to place it' : undefined}
+                    onDragStart={e => { e.dataTransfer.setData('application/x-floorplan', JSON.stringify({ device: d.id })); e.dataTransfer.effectAllowed = 'move' }}>
                     <span style={{ width: 6, height: 6, borderRadius: '50%', background: fpSt(d.status).color }}/>
                     <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</span>
                     <span className="mono" style={{ fontSize: 11, color: 'var(--text3)' }}>{d.ip}</span>
@@ -757,6 +779,12 @@ export default function TopologyHub({ devs, clientCounts = {}, mode, initialBldg
   }, [viewMode])
 
   const { plans } = useFloorPlans()
+  const { designs } = useFloorDesigns()
+  // A building's floors: the ones drawn in the designer, otherwise its uploaded / built-in drawings
+  const sheetsFor = useCallback((name: string): PanelSheet[] => {
+    const ds = designsForLocation(name, designs)
+    return ds.length ? ds.map(designSheet) : sheetsForLocation(name, plans)
+  }, [designs, plans])
   const bldgGroups = useMemo<BldgGroup[]>(() => {
     const map = new Map<string, Device[]>()
     devs.forEach(d => {
@@ -764,8 +792,8 @@ export default function TopologyHub({ devs, clientCounts = {}, mode, initialBldg
       map.get(d.location)!.push(d)
     })
     // Buildings that have a floor plan but no devices yet
-    for (const p of plans) {
-      if (![...map.keys()].some(k => k.trim().toLowerCase() === p.building.trim().toLowerCase())) map.set(p.building, [])
+    for (const b of [...plans.map(p => p.building), ...designs.map(d => d.building)]) {
+      if (![...map.keys()].some(k => k.trim().toLowerCase() === b.trim().toLowerCase())) map.set(b, [])
     }
     const groups: BldgGroup[] = []
     map.forEach((devices, name) => {
@@ -775,12 +803,12 @@ export default function TopologyHub({ devs, clientCounts = {}, mode, initialBldg
         online:       devices.filter(d => d.status === 'up').length,
         warn:         devices.filter(d => d.status === 'warn').length,
         devices,
-        hasFloorPlan: sheetsForLocation(name, plans).length > 0,
+        hasFloorPlan: sheetsFor(name).length > 0,
         imageUrl:     getBldgImage(name),
       })
     })
     return groups.sort((a, b) => b.total - a.total)
-  }, [devs, plans])
+  }, [devs, plans, designs, sheetsFor])
 
   const deviceTypes = useMemo(() => [...new Set(devs.map(d => d.type))].sort(), [devs])
 
@@ -903,11 +931,12 @@ export default function TopologyHub({ devs, clientCounts = {}, mode, initialBldg
           {(viewMode === 'floormap' || viewMode === 'realtime') && (
             filteredGroups.some(g => g.hasFloorPlan) ? (
               filteredGroups.filter(g => g.hasFloorPlan).map(g => {
-                const sheets = sheetsForLocation(g.name, plans)
+                const sheets = sheetsFor(g.name)
+                const isDesigned = sheets.some(s => s.design)
                 return (
                   <div key={`${g.name}-${sheets.map(s => s.key).join()}`} style={{ marginBottom: 16 }}>
-                    <BuildingFloorPlan building={/ic.?build|building.?a/i.test(g.name) && !plans.some(p => p.building === g.name) ? 'IC Building' : g.name}
-                      location={g.name} sheets={sheets} devices={g.devices} live={viewMode === 'realtime'}
+                    <BuildingFloorPlan building={!isDesigned && /ic.?build|building.?a/i.test(g.name) && !plans.some(p => p.building === g.name) ? 'IC Building' : g.name}
+                      location={g.name} sheets={sheets} devices={g.devices} allDevs={devs} live={viewMode === 'realtime'}
                       onLiveChange={on => setViewMode(on ? 'realtime' : 'floormap')}
                       onBack={() => router.push('/topology')}/>
                   </div>
