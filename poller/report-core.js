@@ -216,4 +216,128 @@ async function buildSnapshot(db, { auto = false, by = 'admin' } = {}) {
   return { row, incidents: inc, worst: worst.map(x => ({ name: x.d.name, ip: x.d.ip, uptimePct: x.a.uptimePct, downMin: x.a.downMin })) }
 }
 
-module.exports = { HISTORY_DAYS, deviceAvailability, latencyTrend, incidents, buildSnapshot, fmtDuration }
+// ── Date-range availability (Reports page) ──────────────────────────────────
+// From latency_samples. The agent saves one row per device about once a
+// minute, at the end of a check round (in practice every 50–130 s), so each
+// row is weighted by the time it really covers: the time since that device's
+// previous row, or one minute after a gap over 5 minutes (agent off/paused).
+// A duplicate row seconds after another therefore adds only those seconds.
+// Time with no row is "not measured" — never counted as online or offline.
+// Uses device_availability_range / availability_timeline from
+// supabase/migration_uptime_reports.sql, otherwise reads the rows (same rules).
+
+const MINUTE = 60_000
+const MAX_GAP_MS = 5 * MINUTE
+const stateOf = s => (LIVE.has(s) ? 'up' : DOWN.has(s) ? 'down' : 'unknown')
+
+// → [{ device_id, t (ms), state, seconds, latency }]
+async function deviceCoverageFallback(db, fromIso, toIso, deviceId) {
+  const start = new Date(fromIso).getTime()
+  const rows = await fetchPaged(() => {
+    const q = db.from('latency_samples').select('id, device_id, status, latency_ms, sampled_at')
+      .gte('sampled_at', new Date(start - MAX_GAP_MS).toISOString()).lt('sampled_at', toIso)
+    return deviceId ? q.eq('device_id', deviceId) : q
+  })
+  const byDevice = new Map()
+  for (const r of rows) {
+    if (!r.device_id) continue
+    const list = byDevice.get(r.device_id) ?? []
+    list.push({ ...r, t: new Date(r.sampled_at).getTime() })
+    byDevice.set(r.device_id, list)
+  }
+  const out = []
+  for (const [id, list] of byDevice) {
+    list.sort((a, b) => a.t - b.t || a.id - b.id)
+    list.forEach((r, i) => {
+      if (r.t < start) return
+      const gap = i ? r.t - list[i - 1].t : Infinity
+      out.push({ device_id: id, t: r.t, state: stateOf(r.status), seconds: gap > MAX_GAP_MS ? 60 : gap / 1000, latency: r.latency_ms })
+    })
+  }
+  return out
+}
+
+/**
+ * Per-device availability in [fromIso, toIso).
+ * → Map(device_id → { upMin, downMin, unknownMin, uptimePct, avgLatencyMs, firstSample, lastSample, lastUp })
+ */
+async function deviceAvailabilityRange(db, fromIso, toIso) {
+  const out = new Map()
+  const { data, error } = await db.rpc('device_availability_range', { p_from: fromIso, p_to: toIso })
+  if (!error) {
+    for (const r of data ?? []) {
+      const up = Number(r.up_min) || 0, down = Number(r.down_min) || 0
+      out.set(r.device_id, {
+        upMin: up, downMin: down, unknownMin: Number(r.unknown_min) || 0, uptimePct: pct(up, down),
+        avgLatencyMs: r.avg_latency_ms == null ? null : Number(r.avg_latency_ms),
+        firstSample: r.first_sample, lastSample: r.last_sample, lastUp: r.last_up,
+      })
+    }
+    return out
+  }
+  const acc = new Map()
+  for (const c of await deviceCoverageFallback(db, fromIso, toIso)) {
+    const a = acc.get(c.device_id) ?? { up: 0, down: 0, unknown: 0, latSum: 0, latN: 0, first: null, last: null, lastUp: null }
+    a[c.state] += c.seconds
+    if (c.latency != null) { a.latSum += c.latency; a.latN++ }
+    a.first = a.first == null ? c.t : Math.min(a.first, c.t)
+    a.last = a.last == null ? c.t : Math.max(a.last, c.t)
+    if (c.state === 'up') a.lastUp = a.lastUp == null ? c.t : Math.max(a.lastUp, c.t)
+    acc.set(c.device_id, a)
+  }
+  const iso = t => (t == null ? null : new Date(t).toISOString())
+  for (const [id, a] of acc) {
+    const up = Math.round(a.up / 60), down = Math.round(a.down / 60)
+    out.set(id, {
+      upMin: up, downMin: down, unknownMin: Math.round(a.unknown / 60), uptimePct: pct(up, down),
+      avgLatencyMs: a.latN ? Math.round((a.latSum / a.latN) * 10) / 10 : null,
+      firstSample: iso(a.first), lastSample: iso(a.last), lastUp: iso(a.lastUp),
+    })
+  }
+  return out
+}
+
+/**
+ * Availability over time in steps of `bucketMin` minutes, for one device or
+ * all devices (deviceId null). Steps with no record at all are returned too
+ * (all zero), so gaps — e.g. while the agent was off — show as "not measured".
+ * → [{ bucket, upMin, downMin, unknownMin, devices }]
+ * @param {string | null} [deviceId]
+ */
+async function availabilityTimeline(db, fromIso, toIso, bucketMin, deviceId = null) {
+  const step = bucketMin * MINUTE
+  const start = new Date(fromIso).getTime()
+  const end = new Date(toIso).getTime()
+  const filled = new Map()
+  for (let t = start; t < end; t += step) filled.set(t, { upMin: 0, downMin: 0, unknownMin: 0, devices: 0 })
+
+  const { data, error } = await db.rpc('availability_timeline', {
+    p_from: fromIso, p_to: toIso, p_bucket_min: bucketMin, p_device: deviceId,
+  })
+  if (!error) {
+    for (const r of data ?? []) {
+      const t = new Date(r.bucket).getTime()
+      filled.set(t, { upMin: Number(r.up_min) || 0, downMin: Number(r.down_min) || 0, unknownMin: Number(r.unknown_min) || 0, devices: Number(r.devices) || 0 })
+    }
+  } else {
+    const secs = new Map()   // step → { up, down, unknown (seconds), devices }
+    for (const c of await deviceCoverageFallback(db, fromIso, toIso, deviceId)) {
+      const t = start + Math.floor((c.t - start) / step) * step
+      const b = secs.get(t) ?? { up: 0, down: 0, unknown: 0, devices: new Set() }
+      b[c.state] += c.seconds
+      b.devices.add(c.device_id)
+      secs.set(t, b)
+    }
+    for (const [t, b] of secs) {
+      filled.set(t, { upMin: Math.round(b.up / 60), downMin: Math.round(b.down / 60), unknownMin: Math.round(b.unknown / 60), devices: b.devices.size })
+    }
+  }
+  return [...filled.entries()].sort((a, b) => a[0] - b[0])
+    .filter(([t]) => t >= start && t < end)
+    .map(([t, b]) => ({ bucket: new Date(t).toISOString(), ...b }))
+}
+
+module.exports = {
+  HISTORY_DAYS, deviceAvailability, latencyTrend, incidents, buildSnapshot, fmtDuration,
+  deviceAvailabilityRange, availabilityTimeline,
+}

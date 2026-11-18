@@ -432,6 +432,33 @@ async function resolveUnreachableWarning(dev, ips, note) {
 // device's network, so it can't tell).
 
 const deviceFails = new Map()   // device id → consecutive checks without evidence
+
+// ── Which network a device belongs to ─────────────────────────────────────────
+// Two networks can use the same addresses (192.168.0.x at home and at school,
+// or a second adapter with a fixed address). A device is only counted as
+// offline when the agent is really on its network:
+//   • on the network the agent sweeps: its router (gateway) must be the one
+//     the device was last seen behind (devices.network_mac), when known;
+//   • on the machine's other networks (VirtualBox, a wired adapter): only
+//     devices that answered there since the agent started.
+// Otherwise the minute is recorded as "not checked" (unknown), never offline.
+// devices.network_mac needs supabase/migration_uptime_reports.sql.
+const answeredThisRun = new Set()   // device ids that answered since the agent started
+let networkMacCol = { ok: false, checkedAt: 0 }
+async function hasNetworkMacColumn() {
+  if (networkMacCol.ok || Date.now() - networkMacCol.checkedAt < 10 * 60_000) return networkMacCol.ok
+  const { error } = await supabase.from('devices').select('network_mac').limit(1)
+  networkMacCol = { ok: !error, checkedAt: Date.now() }
+  if (error) console.log('  [network] run supabase/migration_uptime_reports.sql to tell networks with the same addresses apart (retrying every 10 min)')
+  return networkMacCol.ok
+}
+function inCidr(ip, cidr) {
+  const [base, bits] = (cidr ?? '').split('/')
+  if (!base || bits === undefined) return false
+  const prefix = Number(bits)
+  const mask = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0
+  return ((ipToInt(ip) & mask) >>> 0) === ((ipToInt(base) & mask) >>> 0)
+}
 const lastSeenWrite = new Map() // device id → ms of last last_seen write (throttle)
 const dnsTried = new Map()      // device id → ms of last reverse-DNS attempt
 // Registration needs supabase/migration_auto_discovery.sql. If it's missing we
@@ -743,6 +770,9 @@ async function reconcileDevices(net, icmpMap, neighbors, extraLive = []) {
   const nowMs = Date.now()
   const nowIso = new Date(nowMs).toISOString()
   const nets = localNetworks()
+  const netMacOk = await hasNetworkMacColumn()
+  // Hardware address of the router of the network the agent is on now
+  const gatewayMac = net.gateway ? (neighbors.get(net.gateway) ?? null) : null
 
   // MAC → IP from the neighbour table (plus this machine's own address)
   const macToIp = new Map()
@@ -829,6 +859,8 @@ async function reconcileDevices(net, icmpMap, neighbors, extraLive = []) {
       if (ip !== d.ip) { patch.ip = ip; console.log(`  [discovery] ${d.name} moved ${d.ip} → ${ip}`) }
       if (d.last_method !== method) patch.last_method = method
       if (!d.first_seen) patch.first_seen = nowIso
+      answeredThisRun.add(d.id)
+      if (netMacOk && gatewayMac && inCidr(ip, net.cidr) && d.network_mac !== gatewayMac) patch.network_mac = gatewayMac
       if (nowMs - (lastSeenWrite.get(d.id) ?? 0) > 60_000 || Object.keys(patch).length) {
         patch.last_seen = nowIso
         lastSeenWrite.set(d.id, nowMs)
@@ -868,8 +900,13 @@ async function reconcileDevices(net, icmpMap, neighbors, extraLive = []) {
       continue
     }
 
-    // No evidence this round
-    const reachable = inLocalNetwork(d.ip, nets)
+    // No evidence this round. Is the agent on this device's network?
+    const onSweptNet = inCidr(d.ip, net.cidr)
+    const reachable = onSweptNet
+      // same addresses, but a different router than the one it was seen behind
+      ? !(netMacOk && gatewayMac && d.network_mac && d.network_mac !== gatewayMac)
+      // another network of this machine: only if it answered there since the agent started
+      : inLocalNetwork(d.ip, nets) && answeredThisRun.has(d.id)
     if (d.source === 'discovered' && !reachable) {
       // The agent isn't on this device's network — can't tell
       deviceFails.set(d.id, 0)

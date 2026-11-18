@@ -12,6 +12,7 @@ import {
 } from '@/components/ReportCharts'
 import type { SnmpReport } from '@/lib/snmp-report'
 import Pagination, { usePager, clampPage } from '@/components/Pagination'
+import DeviceAvailabilityCard, { deviceStatusView, StatusChip, ago } from '@/components/DeviceAvailabilityCard'
 
 function fmtRate(mbps: number | null) {
   if (mbps === null) return '—'
@@ -25,9 +26,9 @@ function fmtMinutes(min: number) {
   return h < 24 ? `${h}h ${m}m` : `${Math.floor(h / 24)}d ${h % 24}h`
 }
 
-type Period = '24h' | '7d' | '30d'
+type Period = '24h' | '7d' | '30d' | 'custom'
 
-const PERIOD_MS: Record<Period, number> = {
+const PERIOD_MS: Record<Exclude<Period, 'custom'>, number> = {
   '24h': 86_400_000,
   '7d':  604_800_000,
   '30d': 2_592_000_000,
@@ -87,21 +88,32 @@ function downloadCSV(name: string, header: string[], rows: (string | number | nu
   URL.revokeObjectURL(url)
 }
 
-function exportCSV(rows: DevicePerfRow[], period: Period) {
-  downloadCSV(`network-report-${period}-${new Date().toISOString().slice(0, 10)}.csv`,
-    ['Device Name', 'IP', 'Type', 'Location', 'Status', 'Uptime %', 'Downtime (min)', 'Avg Latency (ms)', 'Alerts'],
-    rows.map(r => [r.name, r.ip, r.type, r.location, r.status, r.uptimePct, r.downMin, r.latency, r.alertCount]))
+function exportCSV(rows: DevicePerfRow[], label: string, periodText: string) {
+  downloadCSV(`network-report-${label}-${new Date().toISOString().slice(0, 10)}.csv`,
+    ['Device Name', 'IP', 'Category', 'Location', 'Current Status', 'Total Uptime (min)', 'Total Downtime (min)', 'Uptime %', 'Downtime %',
+      'Not Measured (min)', 'Last Seen', 'Avg Latency (ms)', 'Alerts', 'Reporting Period'],
+    rows.map(r => [r.name, r.ip, r.type, r.location, r.status, r.upMin, r.downMin, r.uptimePct, r.downtimePct,
+      r.notMeasuredMin, r.lastSeen ? new Date(r.lastSeen).toLocaleString() : '', r.latency, r.alertCount, periodText]))
 }
 
+// "2026-11-18" for <input type="date"> (local time)
+const dayInput = (ms: number) => { const d = new Date(ms); return new Date(ms - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 10) }
+const MAX_RANGE_DAYS = 92
+// The agent heartbeats every round (~15 s); older than this = not reporting
+const AGENT_FRESH_MS = 90_000
+
 interface DevicePerfRow {
-  name: string; ip: string; type: string; location: string; status: string
-  uptimePct: number | null; downMin: number; latency: number | null; alertCount: number
+  id: string; name: string; ip: string; type: string; location: string; status: string
+  uptimePct: number | null; downtimePct: number | null; upMin: number; downMin: number; notMeasuredMin: number
+  lastSeen: string | null; latency: number | null; alertCount: number
 }
 
 // /api/reports/availability — measured by the agent each minute (poller/report-core.js)
 interface Availability {
-  period: Period; historyDays: number; measuredSince: string
-  devices: Record<string, { upMin: number; downMin: number; unknownMin: number; uptimePct: number | null; avgLatencyMs: number | null }>
+  key: string                     // which range this answer is for (set by the page)
+  period: Period; from: string; to: string; historyDays: number; measuredSince: string
+  periodMin: number; measurableMin: number
+  devices: Record<string, { upMin: number; downMin: number; unknownMin: number; uptimePct: number | null; avgLatencyMs: number | null; lastSample?: string | null; lastUp?: string | null }>
   trend: { bucket: string; avgMs: number | null; minMs: number | null; maxMs: number | null; samples: number; offlineDevices: number }[]
   incidents: { id: number; title: string; device: string | null; ip: string | null; location: string | null; method: string | null; rootCause: string | null; startedAt: string; resolvedAt: string | null; durationMs: number; open: boolean }[]
 }
@@ -142,40 +154,91 @@ export default function ReportsPage() {
   const [locF,      setLocF]      = useState('')
   const [statusF,   setStatusF]   = useState('')
 
+  // ── Reporting period: a preset (rolls with the clock) or a custom date range ──
+  const [customFrom, setCustomFrom] = useState(() => dayInput(Date.now() - 6 * 86_400_000))
+  const [customTo,   setCustomTo]   = useState(() => dayInput(Date.now()))
+  const customErr = period !== 'custom' ? null
+    : !customFrom || !customTo ? 'Choose both dates'
+    : customFrom > customTo ? 'The start date is after the end date'
+    : (Date.parse(customTo) - Date.parse(customFrom)) / 86_400_000 + 1 > MAX_RANGE_DAYS ? `Choose at most ${MAX_RANGE_DAYS} days`
+    : null
+  const rangeKey = period === 'custom' ? `custom|${customFrom}|${customTo}` : period
+  // Bounds at the moment of asking (ms)
+  const bounds = useCallback(() => {
+    const now = Date.now()
+    if (period !== 'custom') return { from: now - PERIOD_MS[period], to: now, custom: false }
+    const from = new Date(`${customFrom}T00:00:00`).getTime()
+    const to = Math.min(new Date(`${customTo}T00:00:00`).getTime() + 86_400_000, now)
+    return { from, to, custom: true }
+  }, [period, customFrom, customTo])
+  // Stable for a given selection (the server stops a range that includes today at "now")
+  const rangeQuery = period === 'custom'
+    ? `from=${encodeURIComponent(new Date(`${customFrom}T00:00:00`).toISOString())}&to=${encodeURIComponent(new Date(new Date(`${customTo}T00:00:00`).getTime() + 86_400_000).toISOString())}`
+    : `period=${period}`
+  const fileLabel = period === 'custom' ? `${customFrom}_to_${customTo}` : period
+  const periodText = period === 'custom' ? `${customFrom} to ${customTo}` : { '24h': 'Last 24 hours', '7d': 'Last 7 days', '30d': 'Last 30 days' }[period]
+
   const load = useCallback(async () => {
-    const since = new Date(Date.now() - PERIOD_MS[period]).toISOString()
+    if (customErr) return
+    const { from: fromMs, to: toMs, custom } = bounds()
     // Every alert in the period (one request returns at most 1000 rows)
     const all: Alert[] = []
     for (let from = 0; from < 20_000; from += 1000) {
-      const { data } = await supabase.from('alerts').select('*').gte('created_at', since)
-        .order('created_at', { ascending: false }).range(from, from + 999)
+      let q = supabase.from('alerts').select('*').gte('created_at', new Date(fromMs).toISOString())
+      if (custom) q = q.lt('created_at', new Date(toMs).toISOString())
+      const { data } = await q.order('created_at', { ascending: false }).range(from, from + 999)
       all.push(...((data ?? []) as Alert[]))
       if (!data || data.length < 1000) break
     }
-    const { data: d } = await supabase.from('devices').select('*').order('name')
-    setDevices((d ?? []) as Device[])
     setAlerts(all)
-  }, [period])
+  }, [bounds, customErr])
 
   useEffect(() => { load() }, [load])
   // Keep data current without a manual refresh
   usePolling(load, 30_000)
 
+  // ── Current status: the devices table and the agent's heartbeat, kept live ──
+  const [agentSeen, setAgentSeen] = useState<string | null | undefined>(undefined)   // undefined = not loaded yet
+  const loadLive = useCallback(async () => {
+    const [{ data: d }, { data: ag }] = await Promise.all([
+      supabase.from('devices').select('*').order('name'),
+      supabase.from('agent_status').select('last_seen').order('last_seen', { ascending: false }).limit(1),
+    ])
+    setDevices((d ?? []) as Device[])
+    setAgentSeen((ag?.[0] as { last_seen?: string } | undefined)?.last_seen ?? null)
+  }, [])
+  useEffect(() => {
+    loadLive()
+    let t: ReturnType<typeof setTimeout> | null = null
+    const soon = () => { if (t) clearTimeout(t); t = setTimeout(loadLive, 1000) }
+    const ch = supabase.channel('reports-devices')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, soon)
+      .subscribe()
+    return () => { supabase.removeChannel(ch); if (t) clearTimeout(t) }
+  }, [loadLive])
+  usePolling(loadLive, 15_000)
+  const agentFresh = !!agentSeen && Date.now() - Date.parse(agentSeen) < AGENT_FRESH_MS
+
   const loadAvail = useCallback(async () => {
+    if (customErr) return
+    const key = rangeKey
     try {
-      const r = await fetch(`/api/reports/availability?period=${period}`)
+      const r = await fetch(`/api/reports/availability?${rangeQuery}`)
       const d = await r.json()
-      if (r.ok) { setAvail(d); setAvailErr(null) } else setAvailErr(d.error ?? 'Could not load measurements')
+      if (r.ok) { setAvail({ ...d, key }); setAvailErr(null) } else setAvailErr(d.error ?? 'Could not load measurements')
     } catch { /* keep the last data */ }
-  }, [period])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rangeKey, customErr])
   useEffect(() => { loadAvail() }, [loadAvail])
   usePolling(loadAvail, 60_000)
   // Only use measurements for the selected period
-  const av = avail && avail.period === period ? avail : null
+  const av = avail && avail.key === rangeKey ? avail : null
 
   // ── SNMP devices: uptime + traffic from stored history (server-side) ──
+  // (the SNMP report has the preset periods only)
   const [snmpReport, setSnmpReport] = useState<SnmpReport | null>(null)
   const loadSnmp = useCallback(async () => {
+    if (period === 'custom') return
     try {
       const r = await fetch(`/api/reports/snmp?period=${period}`)
       if (r.ok) setSnmpReport(await r.json())
@@ -206,17 +269,12 @@ export default function ReportsPage() {
     const all = snmpReport && snmpReport.period === period ? snmpReport.devices : null
     if (!all) return null
     const devs = filtering ? all.filter(d => fNames.has(d.name)) : all
-    const measured = devs.filter(d => d.uptimePct !== null)
     const withTraffic = devs.filter(d => d.avgInMbps !== null)
     return {
       devs,
-      upLabels:   measured.map(d => `${d.name} (${d.ip})`),
-      upPct:      measured.map(d => d.uptimePct!),
-      downPct:    measured.map(d => Math.round((100 - d.uptimePct!) * 10) / 10),
       trLabels:   withTraffic.map(d => `${d.name} (${d.ip})`),
       trIn:       withTraffic.map(d => d.inBytes),
       trOut:      withTraffic.map(d => d.outBytes),
-      measuredMin: Math.max(0, ...devs.map(d => d.upMin + d.downMin + d.unknownMin)),
     }
   }, [snmpReport, period, filtering, fNames])
 
@@ -234,7 +292,7 @@ export default function ReportsPage() {
     const vals = fDevices.map(d => av?.devices[d.id]?.avgLatencyMs).filter((v): v is number => v != null)
     return vals.length ? (vals.reduce((a, v) => a + v, 0) / vals.length).toFixed(1) : '—'
   }, [fDevices, av])
-  const measuredNote = period === '30d' && av ? `measured each minute · last ${av.historyDays} days kept` : 'measured each minute'
+  const measuredNote = av && av.measurableMin < av.periodMin ? `measured each minute · last ${av.historyDays} days kept` : 'measured each minute'
   const totalAlerts = pAlerts.length
   const critCount = pAlerts.filter(a => a.severity === 'crit').length
   const warnCount = pAlerts.filter(a => a.severity === 'warn').length
@@ -275,7 +333,8 @@ export default function ReportsPage() {
 
   // ── Incident Frequency chart data ────────────────────────────
   const { freqLabels, freqDown, freqLatency, freqRecovery } = useMemo(() => {
-    if (period === '24h') {
+    const { from: fromMs, to: toMs } = bounds()
+    if (toMs - fromMs <= 86_400_000 + 60_000) {
       const labels = Array.from({length:24},(_,i) => `${i.toString().padStart(2,'0')}:00`)
       const fDown = Array(24).fill(0); const fLat = Array(24).fill(0); const fRec = Array(24).fill(0)
       pAlerts.forEach(a => {
@@ -286,15 +345,17 @@ export default function ReportsPage() {
       })
       return { freqLabels: labels, freqDown: fDown, freqLatency: fLat, freqRecovery: fRec }
     }
-    const days = period === '7d' ? 7 : 30
+    // One bar per calendar day of the range
+    const first = new Date(fromMs); first.setHours(0, 0, 0, 0)
+    const days = Math.max(1, Math.ceil((toMs - first.getTime()) / 86400000))
     const labels = Array.from({length:days},(_,i) => {
-      const d = new Date(Date.now() - (days-1-i)*86400000)
+      const d = new Date(first.getTime() + i*86400000 + 3600000)
       return `${d.getMonth()+1}/${d.getDate()}`
     })
     const fDown = Array(days).fill(0); const fLat = Array(days).fill(0); const fRec = Array(days).fill(0)
     pAlerts.forEach(a => {
-      const dAgo = Math.floor((Date.now() - new Date(a.created_at).getTime()) / 86400000)
-      const idx = days - 1 - dAgo
+      const day = new Date(a.created_at); day.setHours(0, 0, 0, 0)
+      const idx = Math.round((day.getTime() - first.getTime()) / 86400000)
       if (idx >= 0 && idx < days) {
         if (a.severity==='crit') fDown[idx]++
         else if (a.severity==='warn') fLat[idx]++
@@ -302,7 +363,8 @@ export default function ReportsPage() {
       }
     })
     return { freqLabels: labels, freqDown: fDown, freqLatency: fLat, freqRecovery: fRec }
-  }, [pAlerts, period])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pAlerts, rangeKey])
 
   // ── Peak Failure Hours chart data ────────────────────────────
   const peakLabels = Array.from({length:24},(_,i) => i===0?'12am':i===12?'12pm':i<12?`${i}am`:`${i-12}pm`)
@@ -328,27 +390,35 @@ export default function ReportsPage() {
     return { locLabels: labels, locUptime: up, locDowntime: up.map(u => Math.round((100 - u) * 10) / 10) }
   }, [fDevices, av])
 
-  // ── Device Uptime vs Downtime (measured, least available first) ─
-  const { uptimeLabels, uptimeUp, uptimeDown } = useMemo(() => {
-    const rows = fDevices
-      .map(d => ({ d, a: av?.devices[d.id] }))
-      .filter(x => x.a && x.a.uptimePct !== null)
-      .sort((x, y) => x.a!.uptimePct! - y.a!.uptimePct!)
-      .slice(0, 20)
+  // ── Device Uptime vs Downtime (measured; least or most available first, paged) ─
+  const [uptimeOrder, setUptimeOrder] = useState<'least' | 'most'>('least')
+  const uptimeRows = useMemo(() => fDevices
+    .map(d => ({ d, a: av?.devices[d.id] }))
+    .filter(x => x.a && x.a.uptimePct !== null)
+    .sort((x, y) => uptimeOrder === 'least'
+      ? x.a!.uptimePct! - y.a!.uptimePct! || y.a!.downMin - x.a!.downMin
+      : y.a!.uptimePct! - x.a!.uptimePct! || y.a!.upMin - x.a!.upMin), [fDevices, av, uptimeOrder])
+  const uptimePager = usePager(`${rangeKey}|${typeF}|${locF}|${statusF}|${uptimeOrder}`, 20)
+  const uptimePage = clampPage(uptimePager.page, uptimePager.pageSize, uptimeRows.length)
+  const { uptimeLabels, uptimeUp, uptimeDown, uptimeNotes } = useMemo(() => {
+    const rows = uptimeRows.slice((uptimePage - 1) * uptimePager.pageSize, uptimePage * uptimePager.pageSize)
+    // Measured minutes Online / Offline (the chart shows them as time)
     return {
       uptimeLabels: rows.map(r => `${r.d.name} (${r.d.ip})`),
-      uptimeUp: rows.map(r => r.a!.uptimePct!),
-      uptimeDown: rows.map(r => Math.round((100 - r.a!.uptimePct!) * 10) / 10),
+      uptimeUp: rows.map(r => r.a!.upMin),
+      uptimeDown: rows.map(r => r.a!.downMin),
+      uptimeNotes: rows.map(r => `${agentFresh ? 'Now' : 'Last known'}: ${deviceStatusView(r.d, agentFresh).label}`),
     }
-  }, [fDevices, av])
+  }, [uptimeRows, uptimePage, uptimePager.pageSize, agentFresh])
 
   // ── Latency trend (latency_samples, all devices) ─────────────
   const { latLabels, latAvg, latMin, latMax } = useMemo(() => {
     const t = av?.trend ?? []
+    const span = av ? Date.parse(av.to) - Date.parse(av.from) : 0
     const label = (iso: string) => {
       const d = new Date(iso)
       const hh = `${d.getHours().toString().padStart(2, '0')}:00`
-      return period === '24h' ? hh : period === '7d' ? `${d.getMonth() + 1}/${d.getDate()} ${hh}` : `${d.getMonth() + 1}/${d.getDate()}`
+      return span <= 86_400_000 + 60_000 ? hh : span <= 8 * 86_400_000 ? `${d.getMonth() + 1}/${d.getDate()} ${hh}` : `${d.getMonth() + 1}/${d.getDate()}`
     }
     return {
       latLabels: t.map(r => label(r.bucket)),
@@ -356,7 +426,7 @@ export default function ReportsPage() {
       latMin: t.map(r => r.minMs) as number[],
       latMax: t.map(r => r.maxMs) as number[],
     }
-  }, [av, period])
+  }, [av])
 
   // ── Device Performance Summary ───────────────────────────────
   const perfRows: DevicePerfRow[] = useMemo(() => {
@@ -364,20 +434,28 @@ export default function ReportsPage() {
     pAlerts.forEach(a => { if (a.severity !== 'info') counts.set(alertKey(a), (counts.get(alertKey(a)) ?? 0) + 1) })
     return fDevices.map(d => {
       const a = av?.devices[d.id]
+      const up = a?.upMin ?? 0, down = a?.downMin ?? 0
       return {
-        name: d.name, ip: d.ip, type: d.type, location: isUnassigned(d.location) ? 'Unassigned' : d.location,
-        status: STATUS_LABEL[d.status] ?? d.status,
-        uptimePct: a?.uptimePct ?? null, downMin: a?.downMin ?? 0, latency: a?.avgLatencyMs ?? null,
+        id: d.id, name: d.name, ip: d.ip, type: d.type, location: isUnassigned(d.location) ? 'Unassigned' : d.location,
+        status: deviceStatusView(d, agentFresh).label + (agentFresh ? '' : ' (last known)'),
+        uptimePct: a?.uptimePct ?? null,
+        downtimePct: a?.uptimePct != null ? Math.round((100 - a.uptimePct) * 10) / 10 : null,
+        upMin: up, downMin: down,
+        // the whole period minus the minutes the agent could judge (on or off)
+        notMeasuredMin: av ? Math.max(0, av.periodMin - up - down) : 0,
+        lastSeen: d.last_seen ?? null,
+        latency: a?.avgLatencyMs ?? null,
         alertCount: (counts.get(d.name) ?? 0) + (d.name !== d.ip ? counts.get(d.ip) ?? 0 : 0),
       }
     }).sort((x, y) => (x.uptimePct ?? 101) - (y.uptimePct ?? 101) || y.alertCount - x.alertCount)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fDevices, av, pAlerts])
+  }, [fDevices, av, pAlerts, agentFresh])
+  const devById = useMemo(() => new Map(devices.map(d => [d.id, d])), [devices])
 
   // ── Critical incidents (urgent issues, with duration) ────────
   // Paged in the database; the period and the device filter stay applied
   const filterKey = filtering ? `${pgList(fIps)}|${pgList(fNames)}` : ''
-  const incPager = usePager(`${period}|${filterKey}`, 10)
+  const incPager = usePager(`${rangeKey}|${filterKey}`, 10)
   const [incidents, setIncidents] = useState<Incident[]>([])
   const [incTotal, setIncTotal] = useState(0)
   const [openIncidents, setOpenIncidents] = useState(0)
@@ -391,8 +469,10 @@ export default function ReportsPage() {
   else if (!incAnchor.current) incAnchor.current = new Date().toISOString()
 
   const incQuery = useCallback((select: string, opts?: { count?: 'exact'; head?: boolean }) => {
+    const { from, to, custom } = bounds()
     let q = supabase.from('alerts').select(select, opts).eq('severity', 'crit')
-      .gte('created_at', new Date(Date.now() - PERIOD_MS[period]).toISOString())
+      .gte('created_at', new Date(from).toISOString())
+    if (custom) q = q.lt('created_at', new Date(to).toISOString())
     if (filtering) {
       const ips = pgList(fIps), names = pgList(fNames)
       const parts = [ips && `device_ip.in.(${ips})`, names && `device_name.in.(${names})`].filter(Boolean)
@@ -400,7 +480,7 @@ export default function ReportsPage() {
     }
     return q
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [period, filterKey, filtering])
+  }, [bounds, filterKey, filtering])
 
   const loadIncidents = useCallback(async () => {
     const id = ++incReq.current
@@ -436,7 +516,7 @@ export default function ReportsPage() {
         if (!data || data.length < 1000) break
       }
       downloadCSV(
-        `incidents-${period}-${new Date().toISOString().slice(0, 10)}.csv`,
+        `incidents-${fileLabel}-${new Date().toISOString().slice(0, 10)}.csv`,
         ['Incident', 'Device', 'IP', 'Location', 'Started', 'Resolved', 'Duration (min)', 'Detected by', 'Cause'],
         all.map(i => [i.title, i.device, i.ip, i.location, new Date(i.startedAt).toLocaleString(), i.resolvedAt ? new Date(i.resolvedAt).toLocaleString() : 'open',
           Math.round(i.durationMs / 60_000), i.method, i.rootCause]))
@@ -445,7 +525,7 @@ export default function ReportsPage() {
 
   // ── Device Performance Summary: one row per device, paged on screen ──
   // (computed from the measurements already loaded for the charts; export has every row)
-  const perfPager = usePager(`${period}|${typeF}|${locF}|${statusF}`, 10)
+  const perfPager = usePager(`${rangeKey}|${typeF}|${locF}|${statusF}`, 10)
   const perfPage = clampPage(perfPager.page, perfPager.pageSize, perfRows.length)
   const visibleRows = perfRows.slice((perfPage - 1) * perfPager.pageSize, perfPage * perfPager.pageSize)
 
@@ -458,18 +538,47 @@ export default function ReportsPage() {
           <div style={{ fontSize: 13, color: 'var(--text3)', marginTop: 2 }}>Uptime, latency and alerts measured by the monitoring agent</div>
         </div>
         <div style={{ display: 'flex', gap: 2, padding: 3, background: 'var(--surface3)', borderRadius: 8 }}>
-          {(['24h', '7d', '30d'] as Period[]).map(p => (
+          {(['24h', '7d', '30d', 'custom'] as Period[]).map(p => (
             <button suppressHydrationWarning key={p} onClick={() => setPeriod(p)} style={{
               padding: '6px 14px', borderRadius: 6, border: 'none', fontSize: 12.5, cursor: 'pointer',
               fontWeight: 600, background: period === p ? 'var(--surface)' : 'transparent',
               color: period === p ? 'var(--accent2)' : 'var(--text2)',
               boxShadow: period === p ? '0 1px 3px rgba(15,23,42,.12)' : 'none',
             }}>
-              {p === '24h' ? '24 hours' : p === '7d' ? '7 days' : '30 days'}
+              {p === '24h' ? '24 hours' : p === '7d' ? '7 days' : p === '30d' ? '30 days' : 'Custom'}
             </button>
           ))}
         </div>
+        {period === 'custom' && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, width: '100%', justifyContent: 'flex-end' }}>
+            <label style={{ fontSize: 12, color: 'var(--text2)', display: 'flex', alignItems: 'center', gap: 6 }}>
+              From
+              <input suppressHydrationWarning type="date" className="form-input" style={{ width: 'auto' }} value={customFrom}
+                max={customTo || dayInput(Date.now())} onChange={e => setCustomFrom(e.target.value)} />
+            </label>
+            <label style={{ fontSize: 12, color: 'var(--text2)', display: 'flex', alignItems: 'center', gap: 6 }}>
+              To
+              <input suppressHydrationWarning type="date" className="form-input" style={{ width: 'auto' }} value={customTo}
+                min={customFrom} max={dayInput(Date.now())} onChange={e => setCustomTo(e.target.value)} />
+            </label>
+            {customErr
+              ? <span style={{ fontSize: 12, color: 'var(--crit)' }}>{customErr}</span>
+              : <span style={{ fontSize: 11.5, color: 'var(--text3)' }}>whole days, local time · uptime is measured for the last {av?.historyDays ?? 7} days only</span>}
+          </div>
+        )}
       </div>
+
+      {/* ── Monitoring agent not reporting: statuses are the last ones it measured ── */}
+      {agentSeen !== undefined && !agentFresh && (
+        <div style={{
+          marginBottom: 16, padding: '9px 14px', borderRadius: 'var(--r)', fontSize: 12.5, lineHeight: 1.5,
+          background: 'rgba(217,119,6,.08)', border: '1px solid rgba(217,119,6,.25)', color: 'var(--text2)',
+        }}>
+          <strong style={{ color: 'var(--warn)' }}>Monitoring agent offline</strong>
+          {agentSeen ? <> — last report {new Date(agentSeen).toLocaleString()} ({ago(agentSeen)}).</> : <> — it has not reported yet.</>}
+          {' '}Current statuses show the last thing it measured. Time since then is counted as <em>not measured</em>, never as downtime.
+        </div>
+      )}
 
       {/* ── Summary ── */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 14, marginBottom: 20 }}>
@@ -509,19 +618,22 @@ export default function ReportsPage() {
           <div className="card-header">
             Latency Trend
             <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)' }}>
-              Ping time of all devices, {period === '24h' ? 'hourly' : period === '7d' ? 'every 6 h' : `daily · last ${av?.historyDays ?? 7} days kept`}
+              Ping time of all devices, {(() => {
+                const span = av ? Date.parse(av.to) - Date.parse(av.from) : (period === '24h' ? 86_400_000 : period === '7d' ? 604_800_000 : 2_592_000_000)
+                return span <= 2 * 86_400_000 + 60_000 ? 'hourly' : span <= 8 * 86_400_000 ? 'every 6 h' : `daily · last ${av?.historyDays ?? 7} days kept`
+              })()}
             </span>
           </div>
           <div className="card-body">
             {latLabels.length
-              ? <LatencyTrendChart key={`${period}-${latLabels.length}`} labels={latLabels} avg={latAvg} min={latMin} max={latMax} />
+              ? <LatencyTrendChart key={`${rangeKey}-${latLabels.length}`} labels={latLabels} avg={latAvg} min={latMin} max={latMax} />
               : <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>{av ? 'No latency measured in this period' : 'Loading measurements…'}</div>}
           </div>
         </div>
         <div className="card">
           <div className="card-header">Alert Breakdown</div>
           <div className="card-body">
-            <AlertBreakdownChart key={period} crit={critCount} warn={warnCount} acked={resolvedAlerts.length} />
+            <AlertBreakdownChart key={rangeKey} crit={critCount} warn={warnCount} acked={resolvedAlerts.length} />
           </div>
         </div>
       </div>
@@ -545,7 +657,7 @@ export default function ReportsPage() {
         <div className="card">
           <div className="card-header">Incident Frequency Over Time</div>
           <div className="card-body">
-            <IncidentFrequencyChart key={period} labels={freqLabels} downtime={freqDown} highLatency={freqLatency} recovery={freqRecovery} />
+            <IncidentFrequencyChart key={rangeKey} labels={freqLabels} downtime={freqDown} highLatency={freqLatency} recovery={freqRecovery} />
           </div>
         </div>
         <div className="card">
@@ -554,7 +666,7 @@ export default function ReportsPage() {
             <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)' }}>By hour of day</span>
           </div>
           <div className="card-body">
-            <PeakFailureHoursChart key={period} labels={peakLabels} counts={hourCounts} />
+            <PeakFailureHoursChart key={rangeKey} labels={peakLabels} counts={hourCounts} />
           </div>
         </div>
       </div>
@@ -568,7 +680,7 @@ export default function ReportsPage() {
           </div>
           <div className="card-body">
             {topLabels.length
-              ? <TopDevicesChart key={`${period}-${topLabels.join()}`} labels={topLabels} counts={topCounts} />
+              ? <TopDevicesChart key={`${rangeKey}-${topLabels.join()}`} labels={topLabels} counts={topCounts} />
               : <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>No critical or warning alerts in this period</div>}
           </div>
         </div>
@@ -579,7 +691,7 @@ export default function ReportsPage() {
           </div>
           <div className="card-body">
             {locLabels.length
-              ? <LocationHealthChart key={`${period}-${locLabels.join()}`} labels={locLabels} uptime={locUptime} downtime={locDowntime} />
+              ? <LocationHealthChart key={`${rangeKey}-${locLabels.join()}`} labels={locLabels} uptime={locUptime} downtime={locDowntime} />
               : <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>{av ? 'No measurements in this period' : 'Loading measurements…'}</div>}
           </div>
         </div>
@@ -589,43 +701,47 @@ export default function ReportsPage() {
       <div className="card" style={{ marginBottom: 20 }}>
         <div className="card-header">
           Device Uptime vs Downtime
-          <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)' }}>Share of measured minutes Online · least available first (up to 20)</span>
+          <span style={{ fontSize: 11, color: 'var(--text3)', fontWeight: 400 }}>Measured time Online vs Offline · hover for exact time and %</span>
+          <div className="card-header-actions" style={{ marginLeft: 'auto', display: 'flex', gap: 2, padding: 3, background: 'var(--surface3)', borderRadius: 8 }}>
+            {([['least', 'Least available'], ['most', 'Most available']] as const).map(([k, label]) => (
+              <button suppressHydrationWarning key={k} onClick={() => setUptimeOrder(k)} style={{
+                padding: '4px 12px', borderRadius: 6, border: 'none', fontSize: 12, cursor: 'pointer', fontWeight: 600,
+                background: uptimeOrder === k ? 'var(--surface)' : 'transparent',
+                color: uptimeOrder === k ? 'var(--accent2)' : 'var(--text2)',
+                boxShadow: uptimeOrder === k ? '0 1px 3px rgba(15,23,42,.12)' : 'none',
+              }}>{label}</button>
+            ))}
+          </div>
         </div>
         <div className="card-body">
           {uptimeLabels.length
-            ? <UptimeDowntimeChart key={`${period}-${uptimeLabels.join()}`} labels={uptimeLabels} uptime={uptimeUp} downtime={uptimeDown} />
+            ? <UptimeDowntimeChart key={`${rangeKey}-${uptimeOrder}-${uptimeLabels.join()}`} labels={uptimeLabels} uptime={uptimeUp} downtime={uptimeDown} unit="min" notes={uptimeNotes} />
             : <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>{av ? 'No measurements in this period' : 'Loading measurements…'}</div>}
         </div>
+        {uptimeRows.length > 0 && (
+          <Pagination page={uptimePage} pageSize={uptimePager.pageSize} total={uptimeRows.length} label="devices"
+            sizes={[10, 20, 30]} onPage={uptimePager.setPage} onPageSize={uptimePager.setPageSize} />
+        )}
       </div>
+
+      {/* ── One device: totals, availability trend, status timeline + current status ── */}
+      {!customErr && (
+        <DeviceAvailabilityCard devices={fDevices} defaultId={uptimeRows[0]?.d.id ?? null}
+          rangeQuery={rangeQuery} rangeKey={rangeKey} agentFresh={agentFresh} />
+      )}
 
       {/* ── SNMP Devices (hidden when there are no SNMP devices) ── */}
       {snmp && snmp.devs.length > 0 && (
         <>
-          <div className="grid-2" style={{ marginBottom: 20 }}>
-            <div className="card">
-              <div className="card-header">
-                SNMP Devices — Uptime vs Downtime
-                <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)', fontWeight: 400 }}>
-                  measured each minute · {fmtMinutes(snmp.measuredMin)} recorded
-                  {period === '30d' && ` (uptime history kept ${snmpReport?.historyDays ?? 7} days)`}
-                </span>
-              </div>
-              <div className="card-body">
-                {snmp.upLabels.length
-                  ? <UptimeDowntimeChart key={`snmp-up-${period}`} labels={snmp.upLabels} uptime={snmp.upPct} downtime={snmp.downPct} />
-                  : <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>No measurements in this period</div>}
-              </div>
+          <div className="card" style={{ marginBottom: 20 }}>
+            <div className="card-header">
+              SNMP Devices — Traffic
+              <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)', fontWeight: 400 }}>data transferred in this period</span>
             </div>
-            <div className="card">
-              <div className="card-header">
-                SNMP Devices — Traffic
-                <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)', fontWeight: 400 }}>data transferred in this period</span>
-              </div>
-              <div className="card-body">
-                {snmp.trLabels.length
-                  ? <SnmpTrafficVolumeChart key={`snmp-tr-${period}`} labels={snmp.trLabels} inBytes={snmp.trIn} outBytes={snmp.trOut} />
-                  : <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>No measurements in this period</div>}
-              </div>
+            <div className="card-body">
+              {snmp.trLabels.length
+                ? <SnmpTrafficVolumeChart key={`snmp-tr-${period}`} labels={snmp.trLabels} inBytes={snmp.trIn} outBytes={snmp.trOut} />
+                : <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>No measurements in this period</div>}
             </div>
           </div>
 
@@ -721,7 +837,7 @@ export default function ReportsPage() {
           Device Performance Summary
           <span style={{ fontSize: 11, color: 'var(--text3)', fontWeight: 400 }}>Measured uptime, worst first · {measuredNote}</span>
           <div className="card-header-actions">
-            <button suppressHydrationWarning className="btn btn-sm" onClick={() => exportCSV(perfRows, period)}>↓ Export CSV</button>
+            <button suppressHydrationWarning className="btn btn-sm" onClick={() => exportCSV(perfRows, fileLabel, periodText)}>↓ Export CSV</button>
           </div>
         </div>
         <div style={{ overflowX: 'auto' }}>
@@ -729,11 +845,15 @@ export default function ReportsPage() {
             <thead>
               <tr>
                 <th>Device Name</th>
-                <th>Type</th>
+                <th>Category</th>
                 <th>Location</th>
-                <th>Status</th>
+                <th title="From the latest monitoring check">Current Status</th>
+                <th>Total Uptime</th>
+                <th>Total Downtime</th>
                 <th>Uptime %</th>
-                <th>Downtime</th>
+                <th>Downtime %</th>
+                <th title="Time in the period the agent could not check this device">Not Measured</th>
+                <th title="Last successful connection">Last Seen</th>
                 <th>Avg Latency</th>
                 <th>Alerts</th>
               </tr>
@@ -747,9 +867,13 @@ export default function ReportsPage() {
                   </td>
                   <td><span className="tag">{r.type}</span></td>
                   <td style={{ color: 'var(--text2)', fontSize: 12 }}>{r.location || '—'}</td>
-                  <td style={{ fontSize: 12 }}>{r.status}</td>
+                  <td>{devById.get(r.id) ? <StatusChip v={deviceStatusView(devById.get(r.id)!, agentFresh)} stale={!agentFresh} /> : r.status}</td>
+                  <td style={{ color: 'var(--text2)', fontSize: 12, whiteSpace: 'nowrap' }}>{r.uptimePct !== null ? fmtMinutes(r.upMin) : '—'}</td>
+                  <td style={{ color: 'var(--text2)', fontSize: 12, whiteSpace: 'nowrap' }}>{r.uptimePct !== null ? fmtMinutes(r.downMin) : '—'}</td>
                   <td><UptimeBadge pct={r.uptimePct} /></td>
-                  <td style={{ color: 'var(--text2)', fontSize: 12 }}>{r.uptimePct !== null ? fmtMinutes(r.downMin) : '—'}</td>
+                  <td style={{ color: 'var(--text2)', fontSize: 12 }}>{r.downtimePct !== null ? `${r.downtimePct.toFixed(0)}%` : '—'}</td>
+                  <td style={{ color: 'var(--text3)', fontSize: 12, whiteSpace: 'nowrap' }}>{av ? fmtMinutes(r.notMeasuredMin) : '—'}</td>
+                  <td style={{ color: 'var(--text2)', fontSize: 12, whiteSpace: 'nowrap' }} title={r.lastSeen ? new Date(r.lastSeen).toLocaleString() : undefined}>{ago(r.lastSeen)}</td>
                   <td style={{ color: 'var(--text2)', fontSize: 12 }}>
                     {r.latency != null ? `${r.latency} ms` : '—'}
                   </td>
@@ -762,7 +886,7 @@ export default function ReportsPage() {
                 </tr>
               ))}
               {perfRows.length === 0 && (
-                <tr><td colSpan={8} style={{ textAlign:'center', padding:24, color:'var(--text3)' }}>No devices found.</td></tr>
+                <tr><td colSpan={12} style={{ textAlign:'center', padding:24, color:'var(--text3)' }}>No devices found.</td></tr>
               )}
             </tbody>
           </table>
