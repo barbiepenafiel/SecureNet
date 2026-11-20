@@ -24,7 +24,7 @@ const SOURCE: Record<string, string> = { snmp: 'router table (SNMP)', gateway: '
 
 const CW = 190, CH = 60, GX = 18, GY = 70, LEAF_COLS = 4, LEAF_GY = 18, PAD = 30
 
-type Box = { dev: Device; x: number; y: number }
+type Box = { dev: Device; x: number; y: number; outside?: boolean }   // outside: uplink from another building
 type Edge = { from: Box; to: Box; port: string | null; source: string | null; bus?: number }
 type Laid = { width: number; height: number; place: (x: number, y: number, boxes: Box[], edges: Edge[], parent: Box | null) => void }
 
@@ -65,40 +65,83 @@ function layoutTree(dev: Device, kids: Map<string, Device[]>): Laid {
   }
 }
 
-export default function TopologyLinks({ devs }: { devs: Device[] }) {
+const HEAD_H = 40      // building section header
+const locOf = (d: Device) => (d.location && d.location !== 'Unassigned' ? d.location : 'Unassigned')
+
+type Section = { name: string; y: number; members: number; linked: number; online: number }
+
+// devs:     the devices shown (already filtered by building / status / type)
+// allDevs:  every device — to follow each one's connection up to the network
+//           even through equipment in another building (drawn faded, as an uplink)
+// building: the Building filter ('all' = one section per building)
+export default function TopologyLinks({ devs, allDevs = devs, building = 'all' }: { devs: Device[]; allDevs?: Device[]; building?: string }) {
   const [zoom, setZoom] = useState(1)
   const [sel, setSel] = useState<Device | null>(null)
+  const perBuilding = building === 'all'
 
-  const { W, H, boxes, edges, unlinked, linkedCount } = useMemo(() => {
-    const ids = new Set(devs.map(d => d.id))
-    const kids = new Map<string, Device[]>()
-    for (const d of devs) {
-      if (!d.parent_id || !ids.has(d.parent_id) || d.parent_id === d.id) continue
-      if (!kids.has(d.parent_id)) kids.set(d.parent_id, [])
-      kids.get(d.parent_id)!.push(d)
-    }
-    for (const list of kids.values()) list.sort((a, b) => a.name.localeCompare(b.name))
-    const hasParent = (d: Device) => !!d.parent_id && ids.has(d.parent_id) && d.parent_id !== d.id
-    const roots = devs.filter(d => !hasParent(d) && kids.get(d.id)?.length)
-      .sort((a, b) => (kids.get(b.id)!.length - kids.get(a.id)!.length) || a.name.localeCompare(b.name))
-    const unlinked = devs.filter(d => !hasParent(d) && !kids.get(d.id)?.length)
+  const { W, H, boxes, edges, unlinked, linkedCount, sections } = useMemo(() => {
+    const byId = new Map(allDevs.map(d => [d.id, d]))
+    // One group per building (Unassigned last), or just the chosen building
+    const grouped = new Map<string, Device[]>()
+    for (const d of devs) grouped.set(locOf(d), [...(grouped.get(locOf(d)) ?? []), d])
+    const groups: [string, Device[]][] = perBuilding
+      ? [...grouped].sort((a, b) => Number(a[0] === 'Unassigned') - Number(b[0] === 'Unassigned') || a[0].localeCompare(b[0]))
+      : [[building, devs]]
 
-    const boxes: Box[] = [], edges: Edge[] = []
-    let x = PAD, H = 0
-    for (const r of roots) {
-      const t = layoutTree(r, kids)
-      t.place(x, PAD, boxes, edges, null)
-      x += t.width + GX * 3
-      H = Math.max(H, t.height)
+    const boxes: Box[] = [], edges: Edge[] = [], sections: Section[] = [], unlinked: Device[] = []
+    let y = PAD, W = 700, linkedCount = 0
+    for (const [name, members] of groups) {
+      const memberIds = new Set(members.map(d => d.id))
+      // The building's devices plus everything they connect up through
+      const nodes = new Map(members.map(d => [d.id, d]))
+      for (const d of members) {
+        const seen = new Set([d.id])
+        let p = d.parent_id
+        while (p && !seen.has(p)) {
+          seen.add(p)
+          const pd = byId.get(p); if (!pd) break
+          if (!nodes.has(p)) nodes.set(p, pd)
+          p = pd.parent_id
+        }
+      }
+      const list = [...nodes.values()]
+      const kids = new Map<string, Device[]>()
+      for (const d of list) {
+        if (!d.parent_id || !nodes.has(d.parent_id) || d.parent_id === d.id) continue
+        if (!kids.has(d.parent_id)) kids.set(d.parent_id, [])
+        kids.get(d.parent_id)!.push(d)
+      }
+      for (const l of kids.values()) l.sort((a, b) => a.name.localeCompare(b.name))
+      const hasParent = (d: Device) => !!d.parent_id && nodes.has(d.parent_id) && d.parent_id !== d.id
+      const roots = list.filter(d => !hasParent(d) && kids.get(d.id)?.length)
+        .sort((a, b) => (kids.get(b.id)!.length - kids.get(a.id)!.length) || a.name.localeCompare(b.name))
+      const alone = members.filter(d => !hasParent(d) && !kids.get(d.id)?.length)
+      unlinked.push(...alone)
+      linkedCount += members.length - alone.length
+      if (!roots.length) continue
+
+      const online = members.filter(d => d.status === 'up' || d.status === 'warn').length
+      if (perBuilding) { sections.push({ name, y, members: members.length, linked: members.length - alone.length, online }); y += HEAD_H }
+      const first = boxes.length
+      let x = PAD, h = 0
+      for (const r of roots) {
+        const t = layoutTree(r, kids)
+        t.place(x, y, boxes, edges, null)
+        x += t.width + GX * 3
+        h = Math.max(h, t.height)
+      }
+      for (let i = first; i < boxes.length; i++) boxes[i].outside = !memberIds.has(boxes[i].dev.id)
+      W = Math.max(W, x - GX * 3 + PAD)
+      y += h + PAD * (perBuilding ? 1.5 : 1)
     }
-    return { W: Math.max(700, x - GX * 3 + PAD), H: H + PAD * 2, boxes, edges, unlinked, linkedCount: devs.length - unlinked.length }
-  }, [devs])
+    return { W, H: y + PAD / 2, boxes, edges, unlinked, linkedCount, sections }
+  }, [devs, allDevs, building, perBuilding])
 
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderBottom: '1px solid var(--border)', fontSize: 12, color: 'var(--text2)', flexWrap: 'wrap' }}>
-        <strong style={{ color: 'var(--text)' }}>{linkedCount} connected devices</strong>
-        <span>· links from routers&apos; ARP / bridge tables, the gateway&apos;s network, or set in Settings → Manage</span>
+        <strong style={{ color: 'var(--text)' }}>{linkedCount} connected device{linkedCount === 1 ? '' : 's'}{perBuilding ? '' : ` in ${building}`}</strong>
+        <span>· {perBuilding ? 'grouped by building' : 'with the equipment they connect through'} · faded boxes are uplinks in another building</span>
         <span style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
           {([['−', () => setZoom(z => Math.max(.5, +(z - .1).toFixed(1)))], ['100%', () => setZoom(1)], ['+', () => setZoom(z => Math.min(2, +(z + .1).toFixed(1)))]] as const).map(([l, fn]) => (
             <button suppressHydrationWarning key={l} className="btn btn-sm" onClick={fn} style={{ minWidth: 34, justifyContent: 'center', padding: '2px 8px' }}>{l}</button>
@@ -115,6 +158,15 @@ export default function TopologyLinks({ devs }: { devs: Device[] }) {
               </filter>
               <style>{`.tl-flow{stroke-dasharray:5 7;animation:tl-flow 1.1s linear infinite}@keyframes tl-flow{to{stroke-dashoffset:-12}}@media (prefers-reduced-motion:reduce){.tl-flow{animation:none}}`}</style>
             </defs>
+            {sections.map(sec => (
+              <g key={`sec-${sec.name}`}>
+                <line x1={PAD / 2} x2={W - PAD / 2} y1={sec.y - 8} y2={sec.y - 8} stroke="#cbd5e1" strokeWidth="1" />
+                <text x={PAD} y={sec.y + 16} fontSize="15" fontWeight="700" fill="#0f172a">{sec.name}</text>
+                <text x={PAD + sec.name.length * 9 + 14} y={sec.y + 16} fontSize="11.5" fill="#64748b">
+                  {sec.members} device{sec.members === 1 ? '' : 's'} · {sec.linked} connected · {sec.online} online
+                </text>
+              </g>
+            ))}
             {edges.map((e, i) => {
               const px = e.from.x + CW / 2, py = e.from.y + CH
               const cx = e.to.x + CW / 2, cy = e.to.y
@@ -143,14 +195,15 @@ export default function TopologyLinks({ devs }: { devs: Device[] }) {
               const d = b.dev, s = st(d.status)
               const isSel = sel?.id === d.id
               return (
-                <g key={d.id} transform={`translate(${b.x},${b.y})`} style={{ cursor: 'pointer' }} onClick={() => setSel(x => x?.id === d.id ? null : d)}>
-                  <title>{`${d.name}\n${d.ip}${d.mac ? ` · ${d.mac}` : ''}\n${d.type} · ${s.label}`}</title>
+                <g key={`${d.id}-${b.x}-${b.y}`} transform={`translate(${b.x},${b.y})`} style={{ cursor: 'pointer' }} opacity={b.outside ? 0.55 : 1}
+                  onClick={() => setSel(x => x?.id === d.id ? null : d)}>
+                  <title>{`${d.name}\n${d.ip}${d.mac ? ` · ${d.mac}` : ''}\n${d.type} · ${s.label}${b.outside ? `\nUplink — in ${locOf(d)}` : ''}`}</title>
                   <rect width={CW} height={CH} rx="10" fill="white" stroke={isSel ? '#7c3aed' : s.color} strokeWidth={isSel ? 2.5 : 1.5}
                     strokeDasharray={d.status === 'down' ? '5 4' : undefined} filter="url(#tl-shadow)"/>
                   <rect width="5" height={CH} rx="2.5" fill={s.color}/>
                   <text x="14" y="22" fontSize="13" fontWeight="700" fill="#0f172a">{trunc(d.name, 22)}</text>
                   <text x="14" y="39" fontSize="11" fill="#475569" fontFamily="var(--mono)">{d.ip}</text>
-                  <text x="14" y="53" fontSize="10" fill="#94a3b8">{trunc(d.type, 14)}</text>
+                  <text x="14" y="53" fontSize="10" fill="#94a3b8">{b.outside ? trunc(`Uplink · ${locOf(d)}`, 22) : trunc(d.type, 14)}</text>
                   <g transform={`translate(${CW - 10 - (s.label.length * 6 + 14)},42)`}>
                     <rect width={s.label.length * 6 + 14} height="14" rx="7" fill={s.bg} stroke={s.color} strokeWidth=".8"/>
                     <text x={(s.label.length * 6 + 14) / 2} y="10" textAnchor="middle" fontSize="9" fontWeight="700" fill={s.color}>{s.label}</text>
@@ -186,6 +239,7 @@ export default function TopologyLinks({ devs }: { devs: Device[] }) {
             {unlinked.map(d => (
               <span key={d.id} title={`${d.ip} · ${st(d.status).label}`} style={{ fontSize: 11.5, padding: '3px 9px', borderRadius: 12, border: `1px solid ${st(d.status).color}55`, background: st(d.status).bg }}>
                 <span style={{ color: st(d.status).color }}>●</span> {d.name} <span className="mono" style={{ color: 'var(--text3)' }}>{d.ip}</span>
+                {perBuilding && <span style={{ color: 'var(--text3)' }}> · {locOf(d)}</span>}
               </span>
             ))}
           </div>

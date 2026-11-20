@@ -845,7 +845,7 @@ export default function TopologyHub({ devs, clientCounts = {}, mode, initialBldg
               onSelectBldg={name => router.push(`/floorplan?bldg=${encodeURIComponent(name)}`)}/>
           )}
 
-          {viewMode === 'links' && <TopologyLinks devs={filteredDevs}/>}
+          {viewMode === 'links' && <TopologyLinks devs={filteredDevs} allDevs={devs} building={bldgFilter}/>}
 
           {viewMode === 'tree' && (() => {
             if (scanLoading && !devs.length) return (
