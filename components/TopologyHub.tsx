@@ -12,6 +12,7 @@ import {
   type FloorRoom, type FloorSheet,
 } from '@/lib/floor-rooms'
 import { useFloorDesigns } from '@/lib/floor-designs'
+import DeviceDetailCard from '@/components/floorplan/DeviceDetailCard'
 import {
   designsForLocation, designSheet, designRooms, designDevices, DesignDrawing, type PanelSheet,
 } from '@/components/floorplan/designSheets'
@@ -308,6 +309,8 @@ function BuildingFloorPlan({ building, location, sheets, devices, allDevs = [], 
   const [liveDevices, setLiveDevices] = useState<Device[]>(devices)
   const [showLive, setShowLive] = useState(live)
   const [focus, setFocus] = useState<string | null>(null)                 // room id highlighted from the side panel
+  const [selDev, setSelDev] = useState<string | null>(null)               // device whose details show in the side panel
+  const pickDevice = (id: string) => setSelDev(cur => (cur === id ? null : id))
   const [tip, setTip] = useState<{ room: FloorRoom; x: number; y: number } | null>(null)
   const { rooms: allRooms } = useFloorRooms()
 
@@ -388,7 +391,7 @@ function BuildingFloorPlan({ building, location, sheets, devices, allDevs = [], 
         </div>
         <div style={{ display: 'flex', gap: 2, padding: 3, background: 'var(--surface3)', borderRadius: 8, marginLeft: 8, flexWrap: 'wrap' }}>
           {sheets.map(s => (
-            <button suppressHydrationWarning key={s.key} style={tabBtn(sheet?.key === s.key)} onClick={() => { setFloor(s.key); setFocus(null) }}>
+            <button suppressHydrationWarning key={s.key} style={tabBtn(sheet?.key === s.key)} onClick={() => { setFloor(s.key); setFocus(null); setSelDev(null) }}>
               {s.label ?? floorLabel(s.floor)}
             </button>
           ))}
@@ -422,7 +425,8 @@ function BuildingFloorPlan({ building, location, sheets, devices, allDevs = [], 
             onMouseLeave={() => setTip(null)}>
             {design ? (
               // The finished layout from the designer; device markers when Live is on
-              <DesignDrawing sheet={design} devById={devById} showDevices={showLive} focusRoom={focus}/>
+              <DesignDrawing sheet={design} devById={devById} showDevices={showLive} focusRoom={focus}
+                selectedDevice={selDev} onSelectDevice={pickDevice}/>
             ) : (<>
               {sheet && <SheetBackground sheet={sheet}/>}
               {/* Room names always; device markers only when Live is on */}
@@ -447,6 +451,14 @@ function BuildingFloorPlan({ building, location, sheets, devices, allDevs = [], 
 
         {/* Side panel */}
         <div style={{ flex: '0 0 300px', maxWidth: '100%', borderLeft: '1px solid var(--border)', display: 'flex', flexDirection: 'column' }}>
+          {selDev && devById.get(selDev) && (() => {
+            const d = devById.get(selDev)!
+            const roomId = Object.keys(byRoom).find(k => byRoom[k].some(x => x.id === d.id))
+            return (
+              <DeviceDetailCard device={d} room={rooms.find(r => r.id === roomId)?.label ?? null}
+                parent={d.parent_id ? devById.get(d.parent_id) : undefined} onClose={() => setSelDev(null)}/>
+            )
+          })()}
           <div style={{ padding: '12px 14px 6px', fontSize: 11, fontWeight: 700, color: 'var(--text3)', letterSpacing: '.06em' }}>ROOMS</div>
           <div style={{ overflowY: 'auto', maxHeight: area.h + 10 }}>
             {rooms.map(r => {
@@ -467,7 +479,9 @@ function BuildingFloorPlan({ building, location, sheets, devices, allDevs = [], 
                   {(active || devs.some(d => !isLive(d))) && devs.length > 0 && (
                     <div style={{ marginTop: 4, paddingLeft: 17 }}>
                       {(active ? devs : devs.filter(d => !isLive(d))).map(d => (
-                        <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, padding: '2px 0' }}>
+                        <div key={d.id} onClick={e => { e.stopPropagation(); pickDevice(d.id) }} title="Show device details"
+                          style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, padding: '2px 4px', margin: '0 -4px', borderRadius: 4, cursor: 'pointer',
+                            background: selDev === d.id ? 'rgba(124,58,237,.08)' : undefined }}>
                           <span style={{ width: 6, height: 6, borderRadius: '50%', background: fpSt(d.status).color }}/>
                           <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</span>
                           <span style={{ color: fpSt(d.status).color, fontSize: 11 }}>{fpSt(d.status).label}</span>

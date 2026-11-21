@@ -76,12 +76,14 @@ const DEVICE_SIZE = 44
 // status) are shown when `showDevices` is on — the panel's Live toggle.
 // Network Admins can drag markers to move them, and drop a device from the
 // panel's list onto the plan; each change is saved to the design right away.
-export function DesignDrawing({ sheet, devById, showDevices, focusRoom, showLinks = true }: {
+export function DesignDrawing({ sheet, devById, showDevices, focusRoom, showLinks = true, selectedDevice = null, onSelectDevice }: {
   sheet: PanelSheet
   devById: Map<string, Device>
   showDevices: boolean
   focusRoom: string | null     // room id from the side panel ("el-<element id>")
   showLinks?: boolean
+  selectedDevice?: string | null                 // device id shown in the side panel
+  onSelectDevice?: (deviceId: string) => void    // a tap on a marker (not a drag)
 }) {
   const { can, profile } = useAuth()
   const who = profile?.full_name || profile?.email || 'Network Admin'
@@ -97,7 +99,7 @@ export function DesignDrawing({ sheet, devById, showDevices, focusRoom, showLink
   const flash = (t: string) => { setNote(t); setTimeout(() => setNote(''), 4000) }
 
   const svgRef = useRef<SVGSVGElement>(null)
-  const drag = useRef<{ id: string; dx: number; dy: number; moved: boolean; base: DesignDoc } | null>(null)
+  const drag = useRef<{ id: string; dx: number; dy: number; moved: boolean; base: DesignDoc; sx: number; sy: number } | null>(null)
   const [dragging, setDragging] = useState<string | null>(null)
   const toSvg = (cx: number, cy: number) => {
     const svg = svgRef.current!, pt = svg.createSVGPoint()
@@ -125,12 +127,13 @@ export function DesignDrawing({ sheet, devById, showDevices, focusRoom, showLink
     if (!editable || el.locked || e.button !== 0) return
     e.stopPropagation()
     const p = toSvg(e.clientX, e.clientY)
-    drag.current = { id: el.id, dx: p.x - el.x, dy: p.y - el.y, moved: false, base: doc }
+    drag.current = { id: el.id, dx: p.x - el.x, dy: p.y - el.y, moved: false, base: doc, sx: e.clientX, sy: e.clientY }
     setDragging(el.id)
     svgRef.current?.setPointerCapture(e.pointerId)
   }
   function onMove(e: React.PointerEvent) {
     const d = drag.current; if (!d) return
+    if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 5) return
     const p = toSvg(e.clientX, e.clientY)
     const x = snap(p.x - d.dx), y = snap(p.y - d.dy)
     d.moved = true
@@ -141,7 +144,10 @@ export function DesignDrawing({ sheet, devById, showDevices, focusRoom, showLink
   }
   function onUp() {
     const d = drag.current; drag.current = null; setDragging(null)
-    if (d?.moved && override) persist(override, d.base)
+    if (d?.moved && override) { persist(override, d.base); return }
+    // Pressed and released without moving: a tap → show its details
+    const el = d && doc.elements.find(x => x.id === d.id)
+    if (el?.deviceId) onSelectDevice?.(el.deviceId)
   }
 
   // A device dropped from the panel's device list
@@ -198,8 +204,13 @@ export function DesignDrawing({ sheet, devById, showDevices, focusRoom, showLink
         {els.map(e => e.kind === 'device'
           ? (showDevices ? (
             <g key={e.id} onPointerDown={ev => onMarkerDown(ev, e)}
-              style={{ cursor: editable && !e.locked ? (dragging === e.id ? 'grabbing' : 'grab') : 'default' }}>
-              <title>{(() => { const d = e.deviceId ? devById.get(e.deviceId) : undefined; return d ? `${d.name} · ${d.ip} · ${statusOf(d).label}${editable ? ' — drag to move' : ''}` : 'Device removed' })()}</title>
+              onClick={() => { if ((!editable || e.locked) && e.deviceId) onSelectDevice?.(e.deviceId) }}
+              style={{ cursor: editable && !e.locked ? (dragging === e.id ? 'grabbing' : 'grab') : 'pointer' }}>
+              {selectedDevice && e.deviceId === selectedDevice && (
+                <circle cx={e.x + e.w / 2} cy={e.y + e.h / 2} r={Math.max(e.w, e.h) / 2 + 9} fill="rgba(124,58,237,.10)"
+                  stroke="#7c3aed" strokeWidth={3} strokeDasharray="6 4" style={{ pointerEvents: 'none' }} />
+              )}
+              <title>{(() => { const d = e.deviceId ? devById.get(e.deviceId) : undefined; return d ? `${d.name} · ${d.ip} · ${statusOf(d).label}${editable ? ' — tap for details, drag to move' : ' — tap for details'}` : 'Device removed' })()}</title>
               <Item el={e} dev={e.deviceId ? devById.get(e.deviceId) : undefined} />
               {/* easy to grab, including the name under the icon */}
               <rect x={e.x - 4} y={e.y - 4} width={e.w + 8} height={e.h + 30} fill="transparent" />
@@ -220,7 +231,7 @@ export function DesignDrawing({ sheet, devById, showDevices, focusRoom, showLink
       ) : editable && showDevices ? (
         <div style={{ position: 'absolute', top: 10, right: 10, padding: '3px 9px', borderRadius: 12, fontSize: 11, color: 'var(--text3)',
           background: 'rgba(255,255,255,.9)', border: '1px solid var(--border)', pointerEvents: 'none' }}>
-          Drag devices to move them
+          Tap a device for details · drag to move
         </div>
       ) : null}
     </>
